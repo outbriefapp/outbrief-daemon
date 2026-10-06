@@ -42,18 +42,22 @@ export interface SettingsResult {
  * sealed with the end-to-end key, for an app with no daemon of its own (a phone):
  *
  * - `GET /multica/settings` → `{ settings, status }` (only a token hint, never the token)
- * - `POST /multica/workspaces` `{ token }` → `{ workspaces }`; 422 `invalid_multica_token`
- * - `PUT /multica/settings` `{ token, workspaceId }`; 422 `invalid_multica_token` / `workspace_not_found`
+ * - `POST /multica/workspaces` `{ token? }` → `{ workspaces }` (the saved token's without one); 422
+ *   `invalid_multica_token` / `multica_not_configured`
+ * - `PUT /multica/settings` `{ token?, workspaceIds }` (every workspace to listen to; no token keeps
+ *   the saved one; an older app's
+ *   `{ token, workspaceId }` is a list of one); 422 `invalid_multica_token` / `workspace_not_found`
  * - `DELETE /multica/settings` → 204
  * - `POST /multica/issues` `{ issues: [{ workspaceId, issueId }] }` → `{ issues }`: those issues as
  *   they are now (project, priority, last update) for the app's call list; missing ones are left
  *   out; 422 `multica_not_configured`
- * - `GET /multica/dispatch/options` → `{ projects, agents }`: where the app can dispatch to, and
+ * - `GET /multica/dispatch/options` → `{ projects, agents }`: where the app can dispatch to in the
+ *   first workspace; `POST /multica/dispatch/options` `{ workspaceId }` the same in that one; and
  *   whether each agent's machine is online
- * - `POST /multica/uploads` `{ name, type, data }` (one image, base64, at most Multica's 100 MB)
+ * - `POST /multica/uploads` `{ name, type, data, workspaceId? }` (one image, base64, at most Multica's 100 MB)
  *   → `{ attachment: { id, filename, markdownUrl } }`: uploaded to the workspace for a dispatch;
  *   400 `invalid_dispatch` when it is not an image or is too big
- * - `POST /multica/dispatches` `{ projectId, agentId, prompt, attachments? }` → `{ dispatch }`: the
+ * - `POST /multica/dispatches` `{ projectId, agentId, prompt, attachments?, workspaceId? }` → `{ dispatch }`: the
  *   picked agent turns what the user said (and the uploaded images) into an issue (Multica's smart
  *   create); 422 `agent_unavailable` (with Multica's `message`) / `project_not_found` /
  *   `agent_not_found`, 400 `invalid_dispatch`
@@ -230,7 +234,6 @@ async function route(
   }
   if (path === "/multica/workspaces" && method === "POST") {
     const token = stringField(body, "token");
-    if (!token) return { status: 400, body: { error: "invalid_multica_token" } };
     return { status: 200, body: { workspaces: await options.multica.listWorkspaces(token) } };
   }
   if (path === "/multica/issues" && method === "POST") {
@@ -241,6 +244,12 @@ async function route(
   if (path === "/multica/dispatch/options" && method === "GET") {
     return { status: 200, body: await options.dispatcher.options() };
   }
+  if (path === "/multica/dispatch/options" && method === "POST") {
+    return {
+      status: 200,
+      body: await options.dispatcher.options(stringField(body, "workspaceId")),
+    };
+  }
   if (path === "/multica/dispatches" && method === "GET") {
     return { status: 200, body: { dispatches: await options.dispatcher.list() } };
   }
@@ -249,13 +258,20 @@ async function route(
     const agentId = stringField(body, "agentId");
     const prompt = rawString(body, "prompt") ?? "";
     const attachments = dispatchAttachments(body);
+    const workspaceId = stringField(body, "workspaceId");
     if (!projectId || !agentId || !attachments) {
       return { status: 400, body: { error: "invalid_dispatch" } };
     }
     return {
       status: 200,
       body: {
-        dispatch: await options.dispatcher.create({ projectId, agentId, prompt, attachments }),
+        dispatch: await options.dispatcher.create({
+          projectId,
+          agentId,
+          prompt,
+          attachments,
+          ...(workspaceId ? { workspaceId } : {}),
+        }),
       },
     };
   }
@@ -268,7 +284,12 @@ async function route(
     }
     return {
       status: 200,
-      body: { attachment: await options.dispatcher.upload({ name, type, data }) },
+      body: {
+        attachment: await options.dispatcher.upload(
+          { name, type, data },
+          stringField(body, "workspaceId"),
+        ),
+      },
     };
   }
   if (path === "/multica/dispatches/lookup" && method === "POST") {
@@ -283,9 +304,11 @@ async function route(
   }
   if (path === "/multica/settings" && method === "PUT") {
     const token = stringField(body, "token");
-    const workspaceId = stringField(body, "workspaceId");
-    if (!token || !workspaceId) return { status: 400, body: { error: "invalid_multica_settings" } };
-    return { status: 200, body: await options.multica.save(token, workspaceId) };
+    const workspaceIds = workspaceIdList(body);
+    if (!workspaceIds?.length) {
+      return { status: 400, body: { error: "invalid_multica_settings" } };
+    }
+    return { status: 200, body: await options.multica.save(token, workspaceIds) };
   }
   return { status: 404, body: { error: "not_found" } };
 }
@@ -315,6 +338,22 @@ function stringField(body: unknown, key: string): string | undefined {
   if (!body || typeof body !== "object") return undefined;
   const value = (body as Record<string, unknown>)[key];
   return typeof value === "string" && value.trim() ? value.trim() : undefined;
+}
+
+/** `workspaceIds` (non-empty strings), else an older app's single `workspaceId`; undefined when malformed. */
+function workspaceIdList(body: unknown): string[] | undefined {
+  const list =
+    body && typeof body === "object"
+      ? (body as { workspaceIds?: unknown }).workspaceIds
+      : undefined;
+  if (list === undefined) {
+    const one = stringField(body, "workspaceId");
+    return one ? [one] : undefined;
+  }
+  if (!Array.isArray(list) || !list.every((id) => typeof id === "string" && id.trim())) {
+    return undefined;
+  }
+  return list.map((id: string) => id.trim());
 }
 
 /** `{ issues: [{ workspaceId, issueId }] }`, at most `MAX_ISSUE_REFS`; undefined when malformed. */

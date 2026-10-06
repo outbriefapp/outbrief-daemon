@@ -11,6 +11,8 @@ export interface MulticaReportInput {
   content: string;
   multica: {
     workspaceId: string;
+    /** Set only while listening to several workspaces, so the app can say which one. */
+    workspaceName?: string;
     taskId: string;
     issueId: string;
     issueIdentifier: string;

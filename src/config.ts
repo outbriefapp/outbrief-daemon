@@ -12,15 +12,21 @@ export function multicaApiUrl(): string {
   return process.env.OUTBRIEF_MULTICA_API_URL?.trim() || "https://api.multica.ai";
 }
 
+/** A Multica workspace the daemon listens to. */
+export interface MulticaWorkspaceRef {
+  id: string;
+  name: string;
+}
+
 /**
- * The user's Multica token and workspace, set from the app's settings. It never leaves this
- * machine: the daemon listens to the workspace and posts replies itself.
+ * The user's Multica token and workspaces, set from the app's settings. It never leaves this
+ * machine: the daemon listens to every workspace and posts replies itself.
  */
 export interface MulticaSettings {
   /** Personal access token (mul_…). */
   token: string;
-  workspaceId: string;
-  workspaceName: string;
+  /** At least one; the first is where the app dispatches by default. */
+  workspaces: MulticaWorkspaceRef[];
   updatedAt: string;
 }
 
@@ -116,6 +122,7 @@ export function loadConfig(): DaemonConfig | undefined {
   if (!parsed) return undefined;
   const llm = parseLlmConfig(parsed.llm);
   const brief = parseBriefConfig(parsed.brief);
+  const multica = multicaSettings(parsed.multica);
   if (!parsed.serverUrl || !parsed.token || !parsed.machineId) return undefined;
   return {
     serverUrl: parsed.serverUrl,
@@ -128,7 +135,7 @@ export function loadConfig(): DaemonConfig | undefined {
       addDirs: parsed.claude?.addDirs ?? [],
     },
     codex: { sandbox: parsed.codex?.sandbox ?? "workspace-write" },
-    ...(isMulticaSettings(parsed.multica) ? { multica: parsed.multica } : {}),
+    ...(multica ? { multica } : {}),
     ...(isE2eSettings(parsed.e2e) ? { e2e: parsed.e2e } : {}),
     ...(llm ? { llm } : {}),
     ...(brief ? { brief } : {}),
@@ -207,16 +214,31 @@ function isE2eSettings(value: unknown): value is E2eSettings {
   );
 }
 
-function isMulticaSettings(value: unknown): value is MulticaSettings {
+/**
+ * `multica` when well-formed. One saved by a daemon that listened to a single workspace
+ * (`workspaceId` / `workspaceName`) becomes a list of that one workspace.
+ */
+function multicaSettings(value: unknown): MulticaSettings | undefined {
+  if (!value || typeof value !== "object") return undefined;
+  const v = value as Record<string, unknown>;
+  if (typeof v.token !== "string" || !v.token || typeof v.updatedAt !== "string") return undefined;
+  const workspaces = Array.isArray(v.workspaces)
+    ? v.workspaces.filter(isWorkspaceRef)
+    : typeof v.workspaceId === "string" && typeof v.workspaceName === "string"
+      ? [{ id: v.workspaceId, name: v.workspaceName }]
+      : [];
+  if (!workspaces.length) return undefined;
+  return {
+    token: v.token,
+    workspaces: workspaces.map(({ id, name }) => ({ id, name })),
+    updatedAt: v.updatedAt,
+  };
+}
+
+function isWorkspaceRef(value: unknown): value is MulticaWorkspaceRef {
   if (!value || typeof value !== "object") return false;
   const v = value as Record<string, unknown>;
-  return (
-    typeof v.token === "string" &&
-    v.token.length > 0 &&
-    typeof v.workspaceId === "string" &&
-    typeof v.workspaceName === "string" &&
-    typeof v.updatedAt === "string"
-  );
+  return typeof v.id === "string" && !!v.id && typeof v.name === "string";
 }
 
 /**

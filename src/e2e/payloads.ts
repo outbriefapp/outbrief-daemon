@@ -19,6 +19,8 @@ export interface BriefEnvelope {
 /** Where a `multica` report came from, and where its reply is posted. */
 export interface MulticaOrigin {
   workspaceId: string;
+  /** Set only while listening to several workspaces, so the app can say which one. */
+  workspaceName?: string;
   issueId: string;
   issueIdentifier: string;
   issueTitle: string;

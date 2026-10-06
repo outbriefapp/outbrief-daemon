@@ -16,19 +16,32 @@ export interface RunningListener {
   stop(): Promise<void>;
 }
 
+/** One listened workspace's connection; mirrors the app's `MulticaWorkspaceStatus`. */
+export interface MulticaWorkspaceStatus {
+  workspaceId: string;
+  workspaceName: string;
+  connected: boolean;
+  error: string | null;
+}
+
 /** Whether Multica tasks ring right now; mirrors the app's `MulticaStatus`. */
 export interface MulticaStatus {
   /** A Multica token is saved on this machine. */
   configured: boolean;
-  /** The realtime connection is authenticated and listening for `task:completed`. */
+  /** Every workspace's realtime connection is authenticated and listening for `task:completed`. */
   connected: boolean;
-  /** What the user should fix; null when healthy. */
+  /** What the user should fix (the first workspace that has a problem); null when healthy. */
   error: string | null;
+  /** Each listened workspace on its own, in the saved order. */
+  workspaces: MulticaWorkspaceStatus[];
 }
 
 /** The saved settings as the app sees them: the token itself never leaves the daemon. */
 export interface MulticaSettingsView {
+  workspaces: MulticaWorkspace[];
+  /** The first workspace, for apps that know only one. */
   workspaceId: string;
+  /** Every workspace's name, for apps that know only one. */
   workspaceName: string;
   /** e.g. "mul_…9f3a". */
   tokenHint: string;
@@ -98,16 +111,22 @@ function isRejectedToken(err: unknown): boolean {
   return err instanceof MulticaApiError && (err.status === 401 || err.status === 403);
 }
 
+/** One listened workspace: its client and realtime listener. */
+interface Connection {
+  workspace: MulticaWorkspace;
+  client: MulticaClient;
+  listener: RunningListener;
+}
+
 /**
  * The user's Multica connection, run on their own machine so the token never reaches the cloud:
- * listens to the workspace, reads each finished task and queues it for a call (the outbox generates
+ * listens to each chosen workspace, reads each finished task and queues it for a call (the outbox generates
  * its brief and hands both to outbrief-server), and posts the user's replies as Multica comments.
  * While the machine is off, Multica tasks do not ring.
  */
 export class MulticaService {
   readonly #options: MulticaServiceOptions;
-  #client: MulticaClient | null = null;
-  #listener: RunningListener | null = null;
+  #connections: Connection[] = [];
 
   constructor(options: MulticaServiceOptions) {
     this.#options = options;
@@ -120,36 +139,55 @@ export class MulticaService {
   }
 
   async stop(): Promise<void> {
-    const listener = this.#listener;
-    this.#listener = null;
-    this.#client = null;
-    await listener?.stop();
+    const connections = this.#connections;
+    this.#connections = [];
+    await Promise.all(connections.map((c) => c.listener.stop()));
   }
 
   status(): MulticaStatus {
-    const listener = this.#listener;
-    return listener
-      ? { configured: true, connected: listener.connected, error: listener.error }
-      : { configured: false, connected: false, error: null };
+    const workspaces = this.#connections.map(({ workspace, listener }) => ({
+      workspaceId: workspace.id,
+      workspaceName: workspace.name,
+      connected: listener.connected,
+      error: listener.error,
+    }));
+    const failing = workspaces.find((w) => w.error);
+    return {
+      configured: workspaces.length > 0,
+      connected: workspaces.length > 0 && workspaces.every((w) => w.connected),
+      error: failing
+        ? workspaces.length > 1
+          ? `${failing.workspaceName}: ${failing.error}`
+          : failing.error
+        : null,
+      workspaces,
+    };
   }
 
   view(): MulticaSettingsResponse {
     const saved = this.#options.config.multica;
+    const first = saved?.workspaces[0];
     return {
-      settings: saved
-        ? {
-            workspaceId: saved.workspaceId,
-            workspaceName: saved.workspaceName,
-            tokenHint: tokenHint(saved.token),
-            updatedAt: saved.updatedAt,
-          }
-        : null,
+      settings:
+        saved && first
+          ? {
+              workspaces: saved.workspaces.map(({ id, name }) => ({ id, name })),
+              workspaceId: first.id,
+              workspaceName: saved.workspaces.map((w) => w.name).join(", "),
+              tokenHint: tokenHint(saved.token),
+              updatedAt: saved.updatedAt,
+            }
+          : null,
       status: this.status(),
     };
   }
 
-  /** Workspaces a token can reach; throws `invalid_multica_token` when Multica rejects it. */
-  async listWorkspaces(token: string): Promise<MulticaWorkspace[]> {
+  /**
+   * Workspaces a token (the saved one when none is given) can reach; throws
+   * `invalid_multica_token` when Multica rejects it, `multica_not_configured` when there is none.
+   */
+  async listWorkspaces(token?: string): Promise<MulticaWorkspace[]> {
+    token ??= this.#savedToken();
     try {
       const workspaces = await new MulticaClient(
         { apiUrl: this.#options.apiUrl, token, workspaceId: "" },
@@ -162,14 +200,23 @@ export class MulticaService {
     }
   }
 
-  /** Checks the token with Multica, saves it on this machine, and reconnects with it. */
-  async save(token: string, workspaceId: string): Promise<MulticaSettingsResponse> {
-    const workspace = (await this.listWorkspaces(token)).find((w) => w.id === workspaceId);
-    if (!workspace) throw new MulticaSettingsError("workspace_not_found");
+  /**
+   * Checks the token (the saved one when none is given: only the workspaces change) with Multica,
+   * saves it on this machine with the workspaces to listen to (in the order given, duplicates
+   * dropped), and reconnects with it.
+   */
+  async save(token: string | undefined, workspaceIds: string[]): Promise<MulticaSettingsResponse> {
+    token ??= this.#savedToken();
+    const ids = [...new Set(workspaceIds)];
+    if (!ids.length) throw new MulticaSettingsError("workspace_not_found");
+    const reachable = await this.listWorkspaces(token);
+    const workspaces = ids.map((id) => reachable.find((w) => w.id === id));
+    if (!workspaces.every((w) => w !== undefined)) {
+      throw new MulticaSettingsError("workspace_not_found");
+    }
     const saved: MulticaSettings = {
       token,
-      workspaceId,
-      workspaceName: workspace.name,
+      workspaces,
       updatedAt: new Date().toISOString(),
     };
     this.#options.config.multica = saved;
@@ -244,42 +291,61 @@ export class MulticaService {
     return found.filter((issue) => issue !== null);
   }
 
-  /** A client of `workspaceId` (the saved workspace by default) with the saved token. */
+  #savedToken(): string {
+    const saved = this.#options.config.multica;
+    if (!saved) throw new MulticaSettingsError("multica_not_configured");
+    return saved.token;
+  }
+
+  /** A client of `workspaceId` (the first saved workspace by default) with the saved token. */
   client(workspaceId?: string): MulticaClient {
     const saved = this.#options.config.multica;
     if (!saved) throw new MulticaSettingsError("multica_not_configured");
-    return this.#clientFor(saved, workspaceId ?? saved.workspaceId);
+    return this.#clientFor(saved, workspaceId ?? (saved.workspaces[0] as MulticaWorkspace).id);
   }
 
-  /** Reports may come from an earlier workspace setting: talk to the report's own workspace. */
+  /**
+   * Reports may come from a workspace no longer listened to: talk to the report's own workspace.
+   */
   #clientFor(saved: MulticaSettings, workspaceId: string): MulticaClient {
-    return this.#client && saved.workspaceId === workspaceId
-      ? this.#client
-      : new MulticaClient(
-          { apiUrl: this.#options.apiUrl, token: saved.token, workspaceId },
-          this.#options.fetch,
-        );
-  }
-
-  #connect(saved: MulticaSettings): void {
-    const config: MulticaConfig = {
-      apiUrl: this.#options.apiUrl,
-      token: saved.token,
-      workspaceId: saved.workspaceId,
-    };
-    const client = new MulticaClient(config, this.#options.fetch);
-    const onTask = (task: CompletedTask) => this.#onTaskCompleted(client, task);
-    this.#client = client;
-    this.#listener = this.#options.listen
-      ? this.#options.listen(config, onTask)
-      : startListener(config, onTask, this.#options.log);
-    this.#options.log(
-      `Multica: listening to workspace ${saved.workspaceName} (${saved.workspaceId})`,
+    return (
+      this.#connections.find((c) => c.workspace.id === workspaceId)?.client ??
+      new MulticaClient(
+        { apiUrl: this.#options.apiUrl, token: saved.token, workspaceId },
+        this.#options.fetch,
+      )
     );
   }
 
-  async #onTaskCompleted(client: MulticaClient, task: CompletedTask): Promise<void> {
-    const report = await readTaskReport(client, task, this.#options.retryDelaysMs);
+  /** One realtime connection per workspace: Multica broadcasts `task:completed` per workspace. */
+  #connect(saved: MulticaSettings): void {
+    this.#connections = saved.workspaces.map((workspace) => {
+      const config: MulticaConfig = {
+        apiUrl: this.#options.apiUrl,
+        token: saved.token,
+        workspaceId: workspace.id,
+      };
+      const client = new MulticaClient(config, this.#options.fetch);
+      const onTask = (task: CompletedTask) => this.#onTaskCompleted(client, workspace, task);
+      const listener = this.#options.listen
+        ? this.#options.listen(config, onTask)
+        : startListener(config, onTask, this.#options.log);
+      this.#options.log(`Multica: listening to workspace ${workspace.name} (${workspace.id})`);
+      return { workspace, client, listener };
+    });
+  }
+
+  async #onTaskCompleted(
+    client: MulticaClient,
+    workspace: MulticaWorkspace,
+    task: CompletedTask,
+  ): Promise<void> {
+    const read = await readTaskReport(client, task, this.#options.retryDelaysMs);
+    // With several workspaces, the call says which one the task is from.
+    const report =
+      read && this.#connections.length > 1
+        ? { ...read, multica: { ...read.multica, workspaceName: workspace.name } }
+        : read;
     if (!report) {
       this.#options.log(`Multica: task ${task.taskId} posted no comment; no call`);
       return;

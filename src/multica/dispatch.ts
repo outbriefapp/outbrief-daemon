@@ -164,7 +164,7 @@ function loadList(path: string): Dispatch[] {
 
 export interface DispatcherOptions {
   /**
-   * A client of `workspaceId`, or of the saved workspace; throws `multica_not_configured` when no
+   * A client of `workspaceId`, or of the first saved workspace; throws `multica_not_configured` when no
    * token is saved.
    */
   client: (workspaceId?: string) => MulticaClient;
@@ -188,9 +188,12 @@ export class Dispatcher {
     this.#now = options.now ?? (() => new Date());
   }
 
-  /** The workspace's open projects and its agents, with whether each agent can run now. */
-  async options(): Promise<DispatchOptions> {
-    const client = this.#client();
+  /**
+   * The workspace's open projects and its agents, with whether each agent can run now (the first
+   * saved workspace when none is given).
+   */
+  async options(workspaceId?: string): Promise<DispatchOptions> {
+    const client = this.#client(workspaceId);
     const [projects, agents, runtimes] = await Promise.all([
       client.listProjects(),
       client.listAgents(),
@@ -216,7 +219,7 @@ export class Dispatcher {
    * Uploads one image to the workspace, not bound to an issue yet; the app uploads a dispatch's
    * images one by one, then sends their attachments with `create`.
    */
-  async upload(image: DispatchImage): Promise<DispatchAttachment> {
+  async upload(image: DispatchImage, workspaceId?: string): Promise<DispatchAttachment> {
     const data = Buffer.from(image.data, "base64");
     if (
       !/^image\/[\w.+-]+$/.test(image.type) ||
@@ -225,7 +228,7 @@ export class Dispatcher {
     ) {
       throw new DispatchError("invalid_dispatch");
     }
-    const uploaded = await this.#client().uploadFile({
+    const uploaded = await this.#client(workspaceId).uploadFile({
       name: image.name.trim() || "image",
       type: image.type,
       data,
@@ -240,6 +243,8 @@ export class Dispatcher {
    * the issue.
    */
   async create(input: {
+    /** The first saved workspace when absent. */
+    workspaceId?: string;
     projectId: string;
     agentId: string;
     prompt: string;
@@ -253,7 +258,7 @@ export class Dispatcher {
     if (!attachments.every((a) => /^https?:\/\/[^\s()]+$/.test(a.markdownUrl) && !!a.id)) {
       throw new DispatchError("invalid_dispatch");
     }
-    const client = this.#client();
+    const client = this.#client(input.workspaceId);
     const [project, agent] = await Promise.all([
       client.getProject(input.projectId).catch(notFound<never>("project_not_found")),
       client.getAgent(input.agentId).catch(notFound<never>("agent_not_found")),
