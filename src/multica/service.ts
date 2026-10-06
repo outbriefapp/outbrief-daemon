@@ -341,10 +341,11 @@ export class MulticaService {
     task: CompletedTask,
   ): Promise<void> {
     const read = await readTaskReport(client, task, this.#options.retryDelaysMs);
-    const report = read && {
-      ...read,
-      multica: { ...read.multica, workspaceName: workspace.name },
-    };
+    // With several workspaces, the call says which one the task is from.
+    const report =
+      read && this.#connections.length > 1
+        ? { ...read, multica: { ...read.multica, workspaceName: workspace.name } }
+        : read;
     if (!report) {
       this.#options.log(`Multica: task ${task.taskId} posted no comment; no call`);
       return;

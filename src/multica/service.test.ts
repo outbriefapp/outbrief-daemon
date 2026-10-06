@@ -256,7 +256,6 @@ describe("MulticaService", () => {
         content: "改好了",
         multica: {
           workspaceId: "ws-1",
-          workspaceName: "youtube-dubbing",
           taskId: "task-1",
           reportCommentId: "c1",
           projectTitle: "outbrief",
@@ -264,6 +263,9 @@ describe("MulticaService", () => {
         },
       },
     ]);
+
+    // One workspace: the call need not say which.
+    expect(reports[0]?.multica.workspaceName).toBeUndefined();
 
     const commentId = await service.postReply(
       { workspaceId: "ws-1", issueId: "issue-1", reportCommentId: "c1" },
