@@ -136,29 +136,34 @@ describe("MulticaService", () => {
     expect(listeners).toHaveLength(0);
     expect(service.view()).toEqual({
       settings: null,
-      status: { configured: false, connected: false, error: null },
+      status: { configured: false, connected: false, error: null, workspaces: [] },
     });
   });
 
   it("checks the token, saves it only on this machine, and shows just a hint", async () => {
     const { service, saved, listeners } = setup();
     await expect(service.listWorkspaces("mul_wrong")).rejects.toBeInstanceOf(MulticaSettingsError);
-    await expect(service.save(GOOD, "ws-9")).rejects.toMatchObject({
+    await expect(service.save(GOOD, ["ws-1", "ws-9"])).rejects.toMatchObject({
       code: "workspace_not_found",
     });
+    await expect(service.save(GOOD, [])).rejects.toMatchObject({ code: "workspace_not_found" });
     expect(saved).toHaveLength(0);
 
-    const view = await service.save(GOOD, "ws-2");
+    const view = await service.save(GOOD, ["ws-2"]);
     expect(view.settings).toMatchObject({
+      workspaces: [{ id: "ws-2", name: "side" }],
       workspaceId: "ws-2",
       workspaceName: "side",
       tokenHint: "mul_…9f3a",
     });
     expect(JSON.stringify(view)).not.toContain(GOOD);
-    expect(saved.at(-1)?.multica).toMatchObject({ token: GOOD, workspaceId: "ws-2" });
+    expect(saved.at(-1)?.multica).toMatchObject({
+      token: GOOD,
+      workspaces: [{ id: "ws-2", name: "side" }],
+    });
     expect(listeners.map((l) => [l.workspaceId, l.stopped])).toEqual([["ws-2", false]]);
 
-    await service.save(GOOD, "ws-1");
+    await service.save(GOOD, ["ws-1"]);
     expect(listeners.map((l) => [l.workspaceId, l.stopped])).toEqual([
       ["ws-2", true],
       ["ws-1", false],
@@ -174,19 +179,63 @@ describe("MulticaService", () => {
     const config = baseConfig();
     config.multica = {
       token: GOOD,
-      workspaceId: "ws-1",
-      workspaceName: "youtube-dubbing",
+      workspaces: [{ id: "ws-1", name: "youtube-dubbing" }],
       updatedAt: "2026-09-28T00:00:00Z",
     };
     const { service, listeners } = setup(config);
     service.start();
     expect(listeners).toMatchObject([{ token: GOOD, workspaceId: "ws-1" }]);
-    expect(service.status()).toEqual({ configured: true, connected: true, error: null });
+    expect(service.status()).toEqual({
+      configured: true,
+      connected: true,
+      error: null,
+      workspaces: [
+        { workspaceId: "ws-1", workspaceName: "youtube-dubbing", connected: true, error: null },
+      ],
+    });
+  });
+
+  it("listens to every chosen workspace, each on its own connection", async () => {
+    const { service, saved, listeners, onTask, reports } = setup();
+    const view = await service.save(GOOD, ["ws-1", "ws-2", "ws-1"]);
+    expect(view.settings).toMatchObject({
+      workspaces: [
+        { id: "ws-1", name: "youtube-dubbing" },
+        { id: "ws-2", name: "side" },
+      ],
+      workspaceId: "ws-1",
+      workspaceName: "youtube-dubbing, side",
+    });
+    expect(saved.at(-1)?.multica?.workspaces.map((w) => w.id)).toEqual(["ws-1", "ws-2"]);
+    expect(listeners.map((l) => l.workspaceId)).toEqual(["ws-1", "ws-2"]);
+
+    // One connection down: the status says which workspace.
+    Object.assign(listeners[1] as object, { connected: false, error: "Multica 拒绝了令牌" });
+    expect(service.status()).toMatchObject({
+      configured: true,
+      connected: false,
+      error: "side: Multica 拒绝了令牌",
+      workspaces: [
+        { workspaceId: "ws-1", connected: true, error: null },
+        { workspaceId: "ws-2", workspaceName: "side", connected: false },
+      ],
+    });
+
+    // A task finished in the second workspace is read there and says so.
+    await onTask[1]?.({ taskId: "task-1", issueId: "issue-1", agentId: "agent-1" });
+    expect(reports[0]?.multica).toMatchObject({ workspaceId: "ws-2", workspaceName: "side" });
+
+    // The app dispatches to the first workspace by default.
+    expect(service.client().config.workspaceId).toBe("ws-1");
+    expect(service.client("ws-2").config.workspaceId).toBe("ws-2");
+
+    await service.save(GOOD, ["ws-2"]);
+    expect(listeners.map((l) => l.stopped)).toEqual([true, true, false]);
   });
 
   it("queues finished tasks for the server and posts replies as the user", async () => {
     const { service, onTask, reports, posted } = setup();
-    await service.save(GOOD, "ws-1");
+    await service.save(GOOD, ["ws-1"]);
     await onTask[0]?.({ taskId: "task-1", issueId: "issue-1", agentId: "agent-1" });
     expect(reports).toMatchObject([
       {
@@ -194,6 +243,7 @@ describe("MulticaService", () => {
         content: "改好了",
         multica: {
           workspaceId: "ws-1",
+          workspaceName: "youtube-dubbing",
           taskId: "task-1",
           reportCommentId: "c1",
           projectTitle: "outbrief",
@@ -226,7 +276,7 @@ describe("MulticaService", () => {
   it("reads past calls' issues as they are now, in each report's workspace", async () => {
     const { service, requests } = setup();
     await expect(service.issues([])).rejects.toMatchObject({ code: "multica_not_configured" });
-    await service.save(GOOD, "ws-1");
+    await service.save(GOOD, ["ws-1"]);
     requests.length = 0;
     const issues = await service.issues([
       { workspaceId: "ws-1", issueId: "issue-1" },

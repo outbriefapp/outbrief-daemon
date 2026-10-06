@@ -84,14 +84,33 @@ describe("llm config", () => {
     if (!config) throw new Error("config should load");
     config.multica = {
       token: "mul_x",
-      workspaceId: "ws-1",
-      workspaceName: "w",
+      workspaces: [{ id: "ws-1", name: "w" }],
       updatedAt: "2026-09-28T00:00:00Z",
     };
     saveConfig(config);
     const saved = JSON.parse(readFileSync(configPath(), "utf8"));
     expect(saved.llm).toEqual(llm);
-    expect(saved.multica.workspaceId).toBe("ws-1");
+    expect(saved.multica.workspaces).toEqual([{ id: "ws-1", name: "w" }]);
+  });
+
+  it("reads a single-workspace Multica setting as a list of that one workspace", () => {
+    const updatedAt = "2026-09-28T00:00:00Z";
+    write({
+      ...PAIRED,
+      multica: { token: "mul_x", workspaceId: "ws-1", workspaceName: "w", updatedAt },
+    });
+    expect(loadConfig()?.multica).toEqual({
+      token: "mul_x",
+      workspaces: [{ id: "ws-1", name: "w" }],
+      updatedAt,
+    });
+    write({ ...PAIRED, multica: { token: "mul_x", workspaces: [], updatedAt } });
+    expect(loadConfig()?.multica).toBeUndefined();
+    write({
+      ...PAIRED,
+      multica: { token: "mul_x", workspaces: [{ id: "ws-1", name: "w" }, { id: 3 }], updatedAt },
+    });
+    expect(loadConfig()?.multica?.workspaces).toEqual([{ id: "ws-1", name: "w" }]);
   });
 
   it("replaces llm on disk, dropping a hand-set fallback, and leaves the rest of the file alone", () => {

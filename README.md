@@ -16,7 +16,7 @@
   - 每条回复最多执行一次：还在执行时 server 因重连重发的同一条会被忽略；daemon 在执行途中重启的，重启后直接报 `failed`（结果未知，不重跑）。
   - Agent 的 stdout 直接丢弃（它的答复会作为下一次汇报回来），stderr 只留最后 1000 字作失败原因；运行超过 60 分钟就停掉并报 `failed`。
 - 权限模式和允许的目录只在本机配置，server 下发的只有回复文本和事件 ID。
-- 保存用户自己的 Multica API Token（只存在本机 `~/.outbrief/daemon.json`，权限 600，不上传 server）：用它监听 Multica 工作区，任务完成后读出 Agent 的汇报评论，连同 issue 所属项目名、优先级和更新时间，生成简报后通过 `POST /v1/daemon/multica-reports` 交给 server 生成来电；挂断后的回复由 server 排队发回这台机器，daemon 以用户身份发到 Multica。电脑关机或 daemon 没运行时，Multica 任务不会来电，回复等 daemon 上线后补发（24 小时内）。
+- 保存用户自己的 Multica API Token（只存在本机 `~/.outbrief/daemon.json`，权限 600，不上传 server）：用它监听选中的 Multica 工作区（可以选多个，每个工作区一条连接），任务完成后读出 Agent 的汇报评论，连同 issue 所属项目名、优先级和更新时间，生成简报后通过 `POST /v1/daemon/multica-reports` 交给 server 生成来电；挂断后的回复由 server 排队发回这台机器，daemon 以用户身份发到 Multica。电脑关机或 daemon 没运行时，Multica 任务不会来电，回复等 daemon 上线后补发（24 小时内）。
 
 ## 简报生成
 
@@ -120,14 +120,14 @@ outbrief-daemon pair
 
 | 方法 | 路径 | 说明 |
 |---|---|---|
-| `GET` | `/multica/settings` | `{ settings, status }`；`settings` 只带工作区和 `tokenHint`，从不返回令牌 |
+| `GET` | `/multica/settings` | `{ settings, status }`；`settings` 只带监听的工作区 `workspaces` 和 `tokenHint`，从不返回令牌；`status.workspaces` 是每个工作区各自的连接状态 |
 | `POST` | `/multica/workspaces` | `{ token }` → 这个令牌能访问的工作区；无效 `422 invalid_multica_token` |
-| `PUT` | `/multica/settings` | `{ token, workspaceId }`：先向 Multica 校验，再保存并重连；`422 invalid_multica_token` / `workspace_not_found` |
+| `PUT` | `/multica/settings` | `{ token, workspaceIds }`：要监听的工作区（旧版 App 发的 `{ token, workspaceId }` 当作只有一个），先向 Multica 校验，再保存并重连；`422 invalid_multica_token` / `workspace_not_found` |
 | `DELETE` | `/multica/settings` | 删除令牌并断开 |
 | `POST` | `/multica/issues` | `{ issues: [{ workspaceId, issueId }] }`（最多 100 个）→ `{ issues }`：这些 issue 现在的项目、优先级、更新时间，桌面端「来电」页按它排序；删掉或无权访问的 issue 不返回；没设置令牌 `422 multica_not_configured` |
-| `GET` | `/multica/dispatch/options` | 主动派单能选的 `{ projects, agents }`：工作区里没完成、没取消的项目；每个 Agent 带 `online`（它的 Multica runtime 所在电脑在线），不在线的 Multica 不让派单 |
-| `POST` | `/multica/uploads` | `{ name, type, data }`（一张图片，base64）→ `{ attachment: { id, filename, markdownUrl } }`：派单的图片一张一张传，daemon 转给 Multica `POST /api/upload-file`（不带 issue）。张数不限、每张最大 100 MB，和 Multica 自己的限制一致（它的 `maxUploadSize`，网页端 `MAX_FILE_SIZE`，都没有张数上限；YOUT-226）；不是图片或超过 100 MB `400 invalid_dispatch`。请求体最大 140 MB |
-| `POST` | `/multica/dispatches` | `{ projectId, agentId, prompt, attachments? }` → `{ dispatch }`：调 Multica 智能创建（`POST /api/issues/quick-create`），由选中的 Agent 按用户说的话写 issue（标题、描述、优先级、截止日期都由它从原话里提取，默认指派给它自己），立即返回 `state: "creating"`。`attachments` 是上面传好的图片：把 `![文件名](markdownUrl)` 接在原话后面、id 放进 `attachment_ids`——和 Multica 网页的智能创建一样，Agent 把图片留在 issue 描述里，建 issue 时绑定到它上面；记录里 `prompt` 只存原话，`images` 存张数。Agent 不能运行 `422 agent_unavailable`（`message` 是 Multica 给的原因）、项目 / Agent 不存在 `422 project_not_found` / `agent_not_found`，原话和图片都没有、原话超过 8000 字 `400 invalid_dispatch` |
+| `GET` | `/multica/dispatch/options` | 主动派单能选的 `{ projects, agents }`：第一个监听的工作区里没完成、没取消的项目；每个 Agent 带 `online`（它的 Multica runtime 所在电脑在线），不在线的 Multica 不让派单。`POST` 同一路径带 `{ workspaceId }` 读别的监听工作区 |
+| `POST` | `/multica/uploads` | `{ name, type, data, workspaceId? }`（一张图片，base64）→ `{ attachment: { id, filename, markdownUrl } }`：派单的图片一张一张传，daemon 转给 Multica `POST /api/upload-file`（不带 issue）。张数不限、每张最大 100 MB，和 Multica 自己的限制一致（它的 `maxUploadSize`，网页端 `MAX_FILE_SIZE`，都没有张数上限；YOUT-226）；不是图片或超过 100 MB `400 invalid_dispatch`。请求体最大 140 MB |
+| `POST` | `/multica/dispatches` | `{ projectId, agentId, prompt, attachments?, workspaceId? }` → `{ dispatch }`：在 `workspaceId`（不带就是第一个监听的工作区）调 Multica 智能创建（`POST /api/issues/quick-create`），由选中的 Agent 按用户说的话写 issue（标题、描述、优先级、截止日期都由它从原话里提取，默认指派给它自己），立即返回 `state: "creating"`。`attachments` 是上面传好的图片：把 `![文件名](markdownUrl)` 接在原话后面、id 放进 `attachment_ids`——和 Multica 网页的智能创建一样，Agent 把图片留在 issue 描述里，建 issue 时绑定到它上面；记录里 `prompt` 只存原话，`images` 存张数。Agent 不能运行 `422 agent_unavailable`（`message` 是 Multica 给的原因）、项目 / Agent 不存在 `422 project_not_found` / `agent_not_found`，原话和图片都没有、原话超过 8000 字 `400 invalid_dispatch` |
 | `GET` | `/multica/dispatches` | `{ dispatches }`：从这台电脑派出的单（最多 100 条，新的在前，存在 `~/.outbrief/dispatches.json`），每次读都向 Multica 刷新：还在创建的看 Agent 的任务（任务关联上 issue → `created`；任务失败 / 取消 → `failed` / `cancelled`；任务完成 1 分钟后还没有 issue → `failed`），已创建的读 issue 现在的标题、状态、优先级 |
 | `POST` | `/multica/dispatches/lookup` | `{ id }` → `{ dispatch }`：只刷新这一条（App 的「呼叫中」页轮询它）；`422 dispatch_not_found` |
 | `POST` | `/multica/dispatches/cancel` | `{ id }` → `{ dispatch }`：还在创建时取消 Multica 任务，已经建好 issue 的不动 |

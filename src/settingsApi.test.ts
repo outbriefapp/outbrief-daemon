@@ -49,7 +49,10 @@ async function start() {
   });
   const handle = createSettingsApi({
     dispatcher: {
-      options: async () => ({ projects: [{ id: "p1", title: "outbrief" }], agents: [] }),
+      options: async (workspaceId) => ({
+        projects: [{ id: workspaceId ?? "p1", title: "outbrief" }],
+        agents: [],
+      }),
       create: async (input) => {
         if (input.agentId === "offline") {
           throw new DispatchError("agent_unavailable", "runtime is offline");
@@ -58,12 +61,13 @@ async function start() {
           throw new DispatchError("invalid_dispatch");
         const images = input.attachments?.map((a) => a.id).join(",");
         calls.push(
-          `dispatch ${input.projectId} ${input.agentId} ${input.prompt}${images ? ` [${images}]` : ""}`,
+          `dispatch ${input.projectId} ${input.agentId} ${input.prompt}${images ? ` [${images}]` : ""}${input.workspaceId ? ` in ${input.workspaceId}` : ""}`,
         );
         return { id: "task-1", state: "creating" } as Dispatch;
       },
-      upload: async (image) => {
+      upload: async (image, workspaceId) => {
         if (!image.type.startsWith("image/")) throw new DispatchError("invalid_dispatch");
+        if (workspaceId) calls.push(`upload in ${workspaceId}`);
         return { id: "att-1", filename: image.name, markdownUrl: "https://m.test/att-1" };
       },
       list: async () => [],
@@ -93,14 +97,19 @@ async function start() {
     multica: {
       view: () => ({
         settings: null,
-        status: { configured: false, connected: false, error: null },
+        status: { configured: false, connected: false, error: null, workspaces: [] },
       }),
       listWorkspaces: async (token) => {
         if (token !== "mul_good") throw new MulticaSettingsError("invalid_multica_token");
         return [{ id: "ws-1", name: "youtube-dubbing" }];
       },
-      save: async () => {
-        throw new MulticaSettingsError("workspace_not_found");
+      save: async (_token, workspaceIds) => {
+        if (workspaceIds.includes("ws-9")) throw new MulticaSettingsError("workspace_not_found");
+        calls.push(`save ${workspaceIds.join(",")}`);
+        return {
+          settings: null,
+          status: { configured: true, connected: false, error: null, workspaces: [] },
+        };
       },
       remove: async () => undefined,
       issues: async (refs) =>
@@ -150,7 +159,7 @@ describe("settings API", () => {
   });
 
   it("maps token problems to 422 and leaves other paths alone", async () => {
-    const { call } = await start();
+    const { call, calls } = await start();
     const bad = await call("/multica/workspaces", {
       method: "POST",
       body: JSON.stringify({ token: "mul_bad" }),
@@ -168,6 +177,14 @@ describe("settings API", () => {
     });
     expect(await put.json()).toEqual({ error: "workspace_not_found" });
     expect((await call("/multica/settings", { method: "PUT", body: "{}" })).status).toBe(400);
+    const save = (body: unknown) =>
+      call("/multica/settings", { method: "PUT", body: JSON.stringify(body) });
+    expect((await save({ token: "mul_good", workspaceIds: [] })).status).toBe(400);
+    expect((await save({ token: "mul_good", workspaceIds: ["ws-1", 2] })).status).toBe(400);
+    expect((await save({ token: "mul_good", workspaceIds: ["ws-1", " ws-2 "] })).status).toBe(200);
+    // An older app sends the one workspace it knows.
+    expect((await save({ token: "mul_good", workspaceId: "ws-1" })).status).toBe(200);
+    expect(calls).toEqual(["save ws-1,ws-2", "save ws-1"]);
     expect((await call("/multica/settings", { method: "DELETE" })).status).toBe(204);
     expect((await call("/report")).status).toBe(418);
   });
@@ -230,6 +247,18 @@ describe("settings API", () => {
       200,
     );
     expect(calls.at(-1)).toBe("dispatch p1 a1  [att-1]");
+    // Another listened workspace is picked by id; without one the first is used.
+    const other = await call("/multica/dispatch/options", {
+      method: "POST",
+      body: JSON.stringify({ workspaceId: "ws-2" }),
+    });
+    expect(await other.json()).toEqual({
+      projects: [{ id: "ws-2", title: "outbrief" }],
+      agents: [],
+    });
+    await upload({ name: "a.png", type: "image/png", data: "eA==", workspaceId: "ws-2" });
+    await post({ projectId: "p1", agentId: "a1", prompt: "x", workspaceId: "ws-2" });
+    expect(calls.slice(-2)).toEqual(["upload in ws-2", "dispatch p1 a1 x in ws-2"]);
     expect(
       (await post({ projectId: "p1", agentId: "a1", prompt: "x", attachments: "no" })).status,
     ).toBe(400);
