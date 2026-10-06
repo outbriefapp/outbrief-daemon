@@ -1,5 +1,7 @@
 # outbrief-daemon
 
+[English](README.en.md)
+
 每台用户电脑上的 OutBrief 常驻进程，相当于 Multica 的 `multica daemon`。
 
 三层架构中的位置：
@@ -17,6 +19,62 @@
   - Agent 的 stdout 直接丢弃（它的答复会作为下一次汇报回来），stderr 只留最后 1000 字作失败原因；运行超过 60 分钟就停掉并报 `failed`。
 - 权限模式和允许的目录只在本机配置，server 下发的只有回复文本和事件 ID。
 - 保存用户自己的 Multica API Token（只存在本机 `~/.outbrief/daemon.json`，权限 600，不上传 server）：用它监听选中的 Multica 工作区（可以选多个，每个工作区一条连接），任务完成后读出 Agent 的汇报评论，连同 issue 所属项目名、优先级和更新时间，生成简报后通过 `POST /v1/daemon/multica-reports` 交给 server 生成来电；挂断后的回复由 server 排队发回这台机器，daemon 以用户身份发到 Multica。电脑关机或 daemon 没运行时，Multica 任务不会来电，回复等 daemon 上线后补发（24 小时内）。
+
+## 安装顺序
+
+来电只在同一个匿名账号里转发。推荐让本仓库（daemon）创建账号，桌面 App 和手机 App 都加入这个账号。
+
+1. **部署 [outbrief-server](https://github.com/outbriefapp/outbrief-server)**。只跑一个进程。私有化部署（默认）在还没有主人时，每次启动的日志里打印一次性认领码 `Claim code: XXXX-XXXX-XXXX`。记下服务地址。手机和别的电脑要能访问这个地址；`http://127.0.0.1:8787` 只有部署 server 的那台机器自己能用。给手机配对时，这里的 `--server` 填局域网 IP 或公网 `https://` 地址。
+2. **安装本仓库**。见下一节。`login` 时输入认领码，终端打出二维码。macOS 上再 `install`。
+3. **在同一台电脑上安装桌面 App（[outbrief-app](https://github.com/outbriefapp/outbrief-app)）**。`pnpm tauri build`，安装包在 `src-tauri/target/release/bundle/`。开发时用 `pnpm tauri dev`。daemon 已经在运行时，桌面端第一次打开会自动加入这台 daemon 的账号。
+4. **安装手机 App**。同一仓库，Android / iOS 工程在本机生成后再编译：`pnpm tauri android init`，然后 `pnpm tauri android dev` 或 `pnpm tauri android build`；iOS 用 `pnpm tauri ios init`，然后 `pnpm tauri ios dev` 或 `pnpm tauri ios build`。需要 [Tauri 的移动端环境](https://tauri.app/start/prerequisites/)。仓库里没有应用商店安装包。打开已配对设备的「设置 → 设备 → 添加设备」，或在电脑上执行 `node src/cli.ts pair`，用手机摄像头扫二维码。
+
+### 安装本仓库
+
+需要 Node ≥ 22.18、pnpm 9。命令都在仓库目录里执行。下文的 `outbrief-daemon` 就是 `node src/cli.ts`。想在任意目录直接敲 `outbrief-daemon`，执行一次 `pnpm link --global`，并确认 `pnpm bin -g` 在 `PATH` 里。
+
+```bash
+pnpm install
+node src/cli.ts login --server http://127.0.0.1:8787
+# macOS：开机自启 + Claude Code / Codex 的 Stop hook
+node src/cli.ts install
+```
+
+`login` 不带参数时：server 还没有主人就询问认领码并创建账号，然后显示二维码；提示符处粘贴配对码或 `outbrief://pair?…` 则加入已有账号。已经有账号时：
+
+```bash
+node src/cli.ts login --server https://your-server.example 'outbrief://pair?server=…&code=123456&key=obk1_…'
+node src/cli.ts login 123456
+```
+
+`install` 在 macOS 上写入 `~/Library/LaunchAgents/com.outbrief.daemon.plist`（登录时启动、进程退出后拉起）和 Claude Code、Codex 的 Stop hook。plist 里是 node 和本仓库 `src/cli.ts` 的绝对路径，仓库留在原地。日志在 `~/.outbrief/logs/daemon.out.log` 和 `daemon.err.log`。daemon 已经在跑时，重新 `login` 之后再执行一次 `install`，新令牌才会生效。
+
+Linux 和 Windows 上 `install` 会去调用 `launchctl`，到这一步就停住。这些系统在 `login` 之后用自己的进程管理器运行 `node src/cli.ts run`。Stop hook 写进配置，命令分别是：
+
+```text
+"<node 绝对路径>" "<本仓库>/src/cli.ts" hook claude-code
+"<node 绝对路径>" "<本仓库>/src/cli.ts" hook codex
+```
+
+Claude Code 放在 `~/.claude/settings.json` 的 `hooks.Stop`，Codex 放在 `~/.codex/hooks.json` 的 `hooks.Stop`。Codex 的 hook 命令变了之后要在 Codex 里重新信任一次。
+
+### 配对
+
+没有登录，也没有共享口令。谁先装谁建账号，后来的设备用 6 位配对码加入。配对码 10 分钟有效、只能用一次。二维码和配对链接是 `outbrief://pair?server=<服务地址>&code=<6位>&key=obk1_…`。服务地址和端到端密钥由设备直接交给设备，server 看不到密钥。链接里的 `server` 就是 `login --server` 的地址，手机必须能访问它。
+
+| 已在账号里 | 要加入的设备 | 怎么做 |
+|---|---|---|
+| 这台电脑的 daemon 正在运行 | 同一台电脑的桌面 App | 自动。App 用本机 `~/.outbrief/local-api.key` 向 `127.0.0.1:8790` 要配对码和密钥 |
+| 桌面 App，或 daemon（`node src/cli.ts pair`） | 手机 App | 手机扫「设置 → 设备 → 添加设备」或终端里的二维码 |
+| 手机或另一台电脑上的 App | 一台电脑的 daemon | 在「添加设备」页复制命令，在那台电脑上执行 `node src/cli.ts login 'outbrief://pair?…'` |
+| 任意已配对设备 | 另一台电脑的桌面 App | 桌面端把配对链接贴进欢迎页。桌面端不开摄像头 |
+| 只拿到 6 位数字 | daemon 或 App | 再输入「设置 → 加密」里的同一句话（至少 12 个字符）。没设过这句话时，用带 `key=` 的二维码或配对链接 |
+
+先打开 App、由 App 创建账号也可以：欢迎页填服务地址和认领码，点「创建新账号」，再用「添加设备」里的链接在电脑上 `login`。同一台电脑上的 daemon 配对并运行之后，这台电脑的桌面 App 加入的是 daemon 所在的账号。
+
+只有手机、不装桌面 App：server 和 daemon `login` 做完后，用手机扫终端里的二维码。手机上的 Multica、大模型、汇报语言经 server 加密转给这台电脑的 daemon，电脑要在线。
+
+公共云端把 server 的 `OUTBRIEF_OPEN_SIGNUP=true` 打开后，第一台设备直接建账号，认领码不用填。
 
 ## 简报生成
 
@@ -92,6 +150,8 @@ curl -X POST "http://127.0.0.1:8790/report?dryRun=1" -H "Content-Type: applicati
 去掉 `?dryRun=1` 就是真的发一条汇报、真的来电。Agent 自测不要这样做（见 [AGENTS.md](AGENTS.md)）。
 
 ## 配对：账号与设备
+
+安装顺序、桌面端自动加入、手机扫码见上文「安装顺序」。下面是这台电脑上的命令。
 
 没有登录，也没有共享口令（outbrief-server ADR 0008）。账号是匿名的，每台设备（这台电脑、桌面 App、手机）有自己的令牌；谁先装谁建账号，其他设备用 6 位配对码加入。
 
