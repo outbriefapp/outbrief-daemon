@@ -1,0 +1,35 @@
+{
+  "name": "outbrief-daemon",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "packageManager": "pnpm@9.15.0",
+  "engines": {
+    "node": ">=22.18.0"
+  },
+  "description": "Per-machine OutBrief daemon: relays local agent reports to the OutBrief server and resumes agent sessions with replies from any client.",
+  "bin": {
+    "outbrief-daemon": "./src/cli.ts"
+  },
+  "scripts": {
+    "lint": "biome check .",
+    "format": "biome check --write .",
+    "typecheck": "tsc -p tsconfig.json",
+    "test": "vitest run --passWithNoTests"
+  },
+  "devDependencies": {
+    "@biomejs/biome": "^2.5.14",
+    "@types/node": "^22.18.0",
+    "@types/qrcode": "^1.5.6",
+    "@types/ws": "^8.18.1",
+    "typescript": "^5.9.3",
+    "vitest": "^5.0.1",
+    "ws": "8.22.0"
+  },
+  "dependencies": {
+    "@ai-sdk/openai-compatible": "^3.0.55",
+    "ai": "^7.0.114",
+    "qrcode": "^1.5.4",
+    "zod": "^4.6.5"
+  }
+}
