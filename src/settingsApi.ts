@@ -42,8 +42,10 @@ export interface SettingsResult {
  * sealed with the end-to-end key, for an app with no daemon of its own (a phone):
  *
  * - `GET /multica/settings` → `{ settings, status }` (only a token hint, never the token)
- * - `POST /multica/workspaces` `{ token }` → `{ workspaces }`; 422 `invalid_multica_token`
- * - `PUT /multica/settings` `{ token, workspaceIds }` (every workspace to listen to; an older app's
+ * - `POST /multica/workspaces` `{ token? }` → `{ workspaces }` (the saved token's without one); 422
+ *   `invalid_multica_token` / `multica_not_configured`
+ * - `PUT /multica/settings` `{ token?, workspaceIds }` (every workspace to listen to; no token keeps
+ *   the saved one; an older app's
  *   `{ token, workspaceId }` is a list of one); 422 `invalid_multica_token` / `workspace_not_found`
  * - `DELETE /multica/settings` → 204
  * - `POST /multica/issues` `{ issues: [{ workspaceId, issueId }] }` → `{ issues }`: those issues as
@@ -232,7 +234,6 @@ async function route(
   }
   if (path === "/multica/workspaces" && method === "POST") {
     const token = stringField(body, "token");
-    if (!token) return { status: 400, body: { error: "invalid_multica_token" } };
     return { status: 200, body: { workspaces: await options.multica.listWorkspaces(token) } };
   }
   if (path === "/multica/issues" && method === "POST") {
@@ -304,7 +305,7 @@ async function route(
   if (path === "/multica/settings" && method === "PUT") {
     const token = stringField(body, "token");
     const workspaceIds = workspaceIdList(body);
-    if (!token || !workspaceIds?.length) {
+    if (!workspaceIds?.length) {
       return { status: 400, body: { error: "invalid_multica_settings" } };
     }
     return { status: 200, body: await options.multica.save(token, workspaceIds) };

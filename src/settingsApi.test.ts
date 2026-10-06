@@ -184,7 +184,9 @@ describe("settings API", () => {
     expect((await save({ token: "mul_good", workspaceIds: ["ws-1", " ws-2 "] })).status).toBe(200);
     // An older app sends the one workspace it knows.
     expect((await save({ token: "mul_good", workspaceId: "ws-1" })).status).toBe(200);
-    expect(calls).toEqual(["save ws-1,ws-2", "save ws-1"]);
+    // Without a token the saved one is kept.
+    expect((await save({ workspaceIds: ["ws-2"] })).status).toBe(200);
+    expect(calls).toEqual(["save ws-1,ws-2", "save ws-1", "save ws-2"]);
     expect((await call("/multica/settings", { method: "DELETE" })).status).toBe(204);
     expect((await call("/report")).status).toBe(418);
   });

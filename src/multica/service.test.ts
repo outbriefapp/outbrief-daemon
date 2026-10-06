@@ -229,8 +229,21 @@ describe("MulticaService", () => {
     expect(service.client().config.workspaceId).toBe("ws-1");
     expect(service.client("ws-2").config.workspaceId).toBe("ws-2");
 
-    await service.save(GOOD, ["ws-2"]);
+    // Changing only the workspaces keeps the saved token.
+    expect((await service.listWorkspaces()).map((w) => w.id)).toEqual(["ws-1", "ws-2"]);
+    await service.save(undefined, ["ws-2"]);
+    expect(saved.at(-1)?.multica).toMatchObject({ token: GOOD, workspaces: [{ id: "ws-2" }] });
     expect(listeners.map((l) => l.stopped)).toEqual([true, true, false]);
+  });
+
+  it("needs a saved token to change only the workspaces", async () => {
+    const { service } = setup();
+    await expect(service.listWorkspaces()).rejects.toMatchObject({
+      code: "multica_not_configured",
+    });
+    await expect(service.save(undefined, ["ws-1"])).rejects.toMatchObject({
+      code: "multica_not_configured",
+    });
   });
 
   it("queues finished tasks for the server and posts replies as the user", async () => {

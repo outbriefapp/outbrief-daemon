@@ -121,8 +121,8 @@ outbrief-daemon pair
 | 方法 | 路径 | 说明 |
 |---|---|---|
 | `GET` | `/multica/settings` | `{ settings, status }`；`settings` 只带监听的工作区 `workspaces` 和 `tokenHint`，从不返回令牌；`status.workspaces` 是每个工作区各自的连接状态 |
-| `POST` | `/multica/workspaces` | `{ token }` → 这个令牌能访问的工作区；无效 `422 invalid_multica_token` |
-| `PUT` | `/multica/settings` | `{ token, workspaceIds }`：要监听的工作区（旧版 App 发的 `{ token, workspaceId }` 当作只有一个），先向 Multica 校验，再保存并重连；`422 invalid_multica_token` / `workspace_not_found` |
+| `POST` | `/multica/workspaces` | `{ token? }` → 这个令牌能访问的工作区（不带令牌就用已保存的）；无效 `422 invalid_multica_token`，没保存过 `422 multica_not_configured` |
+| `PUT` | `/multica/settings` | `{ token?, workspaceIds }`：要监听的工作区，不带令牌就沿用已保存的、只改工作区（旧版 App 发的 `{ token, workspaceId }` 当作只有一个），先向 Multica 校验，再保存并重连；`422 invalid_multica_token` / `workspace_not_found` |
 | `DELETE` | `/multica/settings` | 删除令牌并断开 |
 | `POST` | `/multica/issues` | `{ issues: [{ workspaceId, issueId }] }`（最多 100 个）→ `{ issues }`：这些 issue 现在的项目、优先级、更新时间，桌面端「来电」页按它排序；删掉或无权访问的 issue 不返回；没设置令牌 `422 multica_not_configured` |
 | `GET` | `/multica/dispatch/options` | 主动派单能选的 `{ projects, agents }`：第一个监听的工作区里没完成、没取消的项目；每个 Agent 带 `online`（它的 Multica runtime 所在电脑在线），不在线的 Multica 不让派单。`POST` 同一路径带 `{ workspaceId }` 读别的监听工作区 |

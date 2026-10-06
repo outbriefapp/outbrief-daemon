@@ -182,8 +182,12 @@ export class MulticaService {
     };
   }
 
-  /** Workspaces a token can reach; throws `invalid_multica_token` when Multica rejects it. */
-  async listWorkspaces(token: string): Promise<MulticaWorkspace[]> {
+  /**
+   * Workspaces a token (the saved one when none is given) can reach; throws
+   * `invalid_multica_token` when Multica rejects it, `multica_not_configured` when there is none.
+   */
+  async listWorkspaces(token?: string): Promise<MulticaWorkspace[]> {
+    token ??= this.#savedToken();
     try {
       const workspaces = await new MulticaClient(
         { apiUrl: this.#options.apiUrl, token, workspaceId: "" },
@@ -197,10 +201,12 @@ export class MulticaService {
   }
 
   /**
-   * Checks the token with Multica, saves it on this machine with the workspaces to listen to (in
-   * the order given, duplicates dropped), and reconnects with it.
+   * Checks the token (the saved one when none is given: only the workspaces change) with Multica,
+   * saves it on this machine with the workspaces to listen to (in the order given, duplicates
+   * dropped), and reconnects with it.
    */
-  async save(token: string, workspaceIds: string[]): Promise<MulticaSettingsResponse> {
+  async save(token: string | undefined, workspaceIds: string[]): Promise<MulticaSettingsResponse> {
+    token ??= this.#savedToken();
     const ids = [...new Set(workspaceIds)];
     if (!ids.length) throw new MulticaSettingsError("workspace_not_found");
     const reachable = await this.listWorkspaces(token);
@@ -283,6 +289,12 @@ export class MulticaService {
     };
     const found = await mapLimit(refs, ISSUE_LOOKUP_CONCURRENCY, lookup);
     return found.filter((issue) => issue !== null);
+  }
+
+  #savedToken(): string {
+    const saved = this.#options.config.multica;
+    if (!saved) throw new MulticaSettingsError("multica_not_configured");
+    return saved.token;
   }
 
   /** A client of `workspaceId` (the first saved workspace by default) with the saved token. */
