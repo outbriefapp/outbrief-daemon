@@ -103,8 +103,19 @@ function reasonOf(err: unknown): FailureReason {
   return "error";
 }
 
+/**
+ * The error and what caused it: the AI SDK's "Failed to process successful response" only says the
+ * body broke off; the cause says why (e.g. "terminated ← other side closed": the connection was cut).
+ */
 function messageOf(err: unknown): string {
-  return (err instanceof Error ? err.message : String(err)).slice(0, 500);
+  const parts: string[] = [];
+  let e: unknown = err;
+  for (let depth = 0; e !== undefined && e !== null && depth < 5; depth++) {
+    const message = e instanceof Error ? e.message : String(e);
+    if (!parts.includes(message)) parts.push(message);
+    e = e instanceof Error ? e.cause : undefined;
+  }
+  return parts.join(" ← ").slice(0, 500);
 }
 
 /**
