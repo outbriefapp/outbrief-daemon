@@ -29,7 +29,7 @@ function systemPrompt(language: BriefLanguage): string {
   const name = briefLanguageName(language);
   return `你是用户的私人助理。用户同时指挥好几个 AI 编程 Agent（Claude Code、Codex 等），Agent 干完活会写一份书面汇报。你的任务：读完汇报，像一位能干的真人助理在电话里向用户口头汇报那样，把它讲清楚。用户正在忙别的，主要靠耳朵听，偶尔瞄一眼屏幕上的卡片。
 
-称呼：需要称呼用户时一律写成 ${ADDRESS_PLACEHOLDER}（连同大括号原样写出），客户端会替换成用户自己设置的称呼；不要写“老板”“您”之类的固定称呼，也不要写用户的名字。称呼只在开头或提问时用，不必每段都用。
+称呼：第一段 speech 必须以 ${ADDRESS_PLACEHOLDER} 开头，像打电话先叫人一样（例如“${ADDRESS_PLACEHOLDER}，……”）；之后需要称呼用户时也一律写成 ${ADDRESS_PLACEHOLDER}（连同半角大括号原样写出），客户端会替换成用户自己设置的称呼；不要写“老板”之类的固定称呼，也不要写用户的名字。开头之外只在提问时用，不必每段都用。
 
 语言：简报里给用户看和听的文字（headline、facts 的 text、speech、card、decisions 的 question、options 的 label、reason）一律用${name}写，不管汇报原文是什么语言；专有名词、文件名、命令可以保留原文。
 
@@ -168,6 +168,32 @@ function rewritePrompt(
   ].join("\n");
 }
 
+/** Chinese and Japanese take full-width punctuation and no spaces. */
+function takesFullWidth(language: BriefLanguage): boolean {
+  return ["zh", "ja"].includes(language.split("-")[0] ?? "");
+}
+
+/** `{称呼}` as models also write it: full-width braces, spaces inside. */
+const PLACEHOLDER_VARIANT = /[{｛]\s*称呼\s*[}｝]/g;
+
+/**
+ * `brief` that opens by addressing the user as the prompt asks: some models (e.g. DeepSeek) leave
+ * `{称呼}` out or write it their own way, and then the call never says the 称呼 set in the app
+ * (OUTB-58).
+ */
+export function addressUser(brief: Brief, language: BriefLanguage): Brief {
+  const json = JSON.stringify(brief);
+  const normalized = json.replace(PLACEHOLDER_VARIANT, ADDRESS_PLACEHOLDER);
+  const fixed: Brief = normalized === json ? brief : JSON.parse(normalized);
+  const [first, ...rest] = fixed.segments;
+  if (!first || first.speech.trimStart().startsWith(ADDRESS_PLACEHOLDER)) return fixed;
+  const comma = takesFullWidth(language) ? "，" : ", ";
+  return {
+    ...fixed,
+    segments: [{ ...first, speech: `${ADDRESS_PLACEHOLDER}${comma}${first.speech}` }, ...rest],
+  };
+}
+
 /** Critical facts the LLM would not speak, read out verbatim at the end of the call. */
 function supplementSegment(
   missing: BriefFact[],
@@ -175,8 +201,7 @@ function supplementSegment(
   title: string,
   language: BriefLanguage,
 ): BriefSegment {
-  // Chinese and Japanese take full-width punctuation and no spaces.
-  const fullWidth = ["zh", "ja"].includes(language.split("-")[0] ?? "");
+  const fullWidth = takesFullWidth(language);
   const stop = fullWidth ? "。" : ".";
   const sentences = missing.map((f) => (/[。！？.!?]$/.test(f.text) ? f.text : `${f.text}${stop}`));
   return {
@@ -232,20 +257,21 @@ export async function generateBrief(
     }
   }
   const { missing, critical, speechChars } = result;
+  const addressed = addressUser(result.brief, language);
   const brief = missing.length
     ? {
-        ...result.brief,
+        ...addressed,
         segments: [
-          ...result.brief.segments,
+          ...addressed.segments,
           supplementSegment(
             missing,
-            result.brief.segments.length + 1,
+            addressed.segments.length + 1,
             result.supplementTitle,
             language,
           ),
         ],
       }
-    : result.brief;
+    : addressed;
   return {
     brief,
     llmCalls,

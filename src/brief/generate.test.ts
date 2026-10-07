@@ -25,7 +25,7 @@ function brief(coveredFactIds: string[], overrides: Partial<Brief> = {}): Brief 
     segments: [
       {
         id: "s1",
-        speech: "登录页重构做完了。",
+        speech: `${ADDRESS_PLACEHOLDER}，登录页重构做完了。`,
         card: { title: "结果", bullets: ["重构完成"] },
         coveredFactIds,
       },
@@ -210,6 +210,31 @@ describe("brief generation", () => {
       speech: "Also note: The old login API was removed.",
       card: { title: "Also note" },
     });
+  });
+
+  it("opens with the 称呼 when the LLM left it out (OUTB-58)", async () => {
+    const segment = {
+      ...FULL_BRIEF.segments[0],
+      speech: "登录页重构做完了。",
+    } as Brief["segments"][number];
+    const { generate } = setup(() => completion(output({ ...FULL_BRIEF, segments: [segment] })));
+    const zh = await generate("登录页重构完成");
+    expect(zh.brief?.segments[0]?.speech).toBe(`${ADDRESS_PLACEHOLDER}，登录页重构做完了。`);
+    const { generate: generateEn } = setup(() =>
+      completion(output({ ...FULL_BRIEF, segments: [{ ...segment, speech: "It is done." }] })),
+    );
+    const en = await generateEn("登录页重构完成", "en-US");
+    expect(en.brief?.segments[0]?.speech).toBe(`${ADDRESS_PLACEHOLDER}, It is done.`);
+  });
+
+  it("reads the 称呼 the LLM wrote with full-width braces or spaces as the placeholder", async () => {
+    const speech = "｛称呼｝，登录页重构做完了。{ 称呼 }，要合并吗？";
+    const segment = { ...FULL_BRIEF.segments[0], speech } as Brief["segments"][number];
+    const { generate } = setup(() => completion(output({ ...FULL_BRIEF, segments: [segment] })));
+    const submission = await generate("登录页重构完成");
+    expect(submission.brief?.segments[0]?.speech).toBe(
+      `${ADDRESS_PLACEHOLDER}，登录页重构做完了。${ADDRESS_PLACEHOLDER}，要合并吗？`,
+    );
   });
 
   it("follows this machine's locale until the app sets a language", () => {
