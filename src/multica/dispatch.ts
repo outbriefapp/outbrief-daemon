@@ -84,6 +84,12 @@ export interface Dispatch {
   error: string | null;
 }
 
+/** A status issues can be filtered by; mirrors the app's `DispatchIssueStatus`. */
+export interface DispatchIssueStatus {
+  key: string;
+  name: string;
+}
+
 export interface DispatchIssue {
   id: string;
   identifier: string;
@@ -226,19 +232,28 @@ export class Dispatcher {
 
   /**
    * The project's issues the user may comment on instead of creating one, most recently active
-   * first; `query` narrows them by title words or issue number.
+   * first; `query` narrows them by title words or issue number, `statuses` to those in any of
+   * these statuses.
    */
   async issues(input: {
     workspaceId?: string;
     projectId: string;
     query?: string;
+    statuses?: string[];
   }): Promise<DispatchIssue[]> {
     const issues = await this.#client(input.workspaceId).listIssues({
       projectId: input.projectId,
       ...(input.query ? { query: input.query } : {}),
+      ...(input.statuses?.length ? { statuses: input.statuses } : {}),
       limit: ISSUE_PICK_LIMIT,
     });
     return issues.map(issueView);
+  }
+
+  /** The workspace's issue statuses still in use, in board order: what the issue list filters by. */
+  async statuses(workspaceId?: string): Promise<DispatchIssueStatus[]> {
+    const statuses = await this.#client(workspaceId).listIssueStatuses();
+    return statuses.filter((s) => !s.archived_at).map(({ key, name }) => ({ key, name }));
   }
 
   /**

@@ -20,7 +20,7 @@ export interface SettingsApiOptions {
   multica: Pick<MulticaService, "view" | "listWorkspaces" | "save" | "remove" | "issues">;
   dispatcher: Pick<
     Dispatcher,
-    "options" | "issues" | "upload" | "create" | "list" | "lookup" | "cancel"
+    "options" | "issues" | "statuses" | "upload" | "create" | "list" | "lookup" | "cancel"
   >;
   e2e: Pick<E2eKeyring, "view" | "set" | "openSettingsRequest" | "sealSettingsResult">;
   llm: Pick<LlmSettings, "view" | "save" | "remove">;
@@ -57,8 +57,11 @@ export interface SettingsResult {
  * - `GET /multica/dispatch/options` → `{ projects, agents }`: where the app can dispatch to in the
  *   first workspace; `POST /multica/dispatch/options` `{ workspaceId }` the same in that one; and
  *   whether each agent's machine is online
- * - `POST /multica/dispatch/issues` `{ projectId, query?, workspaceId? }` → `{ issues }`: the
- *   project's issues, most recently active first, that a dispatch may comment on instead
+ * - `POST /multica/dispatch/issues` `{ projectId, query?, statuses?, workspaceId? }` → `{ issues }`:
+ *   the project's issues, most recently active first, that a dispatch may comment on instead;
+ *   `statuses` (status keys) keeps those in any of them
+ * - `POST /multica/dispatch/statuses` `{ workspaceId? }` → `{ statuses: [{ key, name }] }`: the
+ *   workspace's issue statuses (custom ones too), in board order, to filter that list by
  * - `POST /multica/uploads` `{ name, type, data, workspaceId? }` (one image, base64, at most Multica's 100 MB)
  *   → `{ attachment: { id, filename, markdownUrl } }`: uploaded to the workspace for a dispatch;
  *   400 `invalid_dispatch` when it is not an image or is too big
@@ -260,16 +263,25 @@ async function route(
     const projectId = stringField(body, "projectId");
     if (!projectId) return { status: 400, body: { error: "invalid_dispatch" } };
     const query = stringField(body, "query");
+    const statuses = statusKeys(body);
     const workspaceId = stringField(body, "workspaceId");
+    if (!statuses) return { status: 400, body: { error: "invalid_dispatch" } };
     return {
       status: 200,
       body: {
         issues: await options.dispatcher.issues({
           projectId,
           ...(query ? { query } : {}),
+          ...(statuses.length ? { statuses } : {}),
           ...(workspaceId ? { workspaceId } : {}),
         }),
       },
+    };
+  }
+  if (path === "/multica/dispatch/statuses" && method === "POST") {
+    return {
+      status: 200,
+      body: { statuses: await options.dispatcher.statuses(stringField(body, "workspaceId")) },
     };
   }
   if (path === "/multica/dispatches" && method === "GET") {
@@ -390,6 +402,17 @@ function issueRefs(body: unknown): { workspaceId: string; issueId: string }[] | 
     refs.push({ workspaceId, issueId });
   }
   return refs;
+}
+
+/** `statuses`: non-empty status keys (none when absent); undefined when malformed. */
+function statusKeys(body: unknown): string[] | undefined {
+  const list =
+    body && typeof body === "object" ? (body as { statuses?: unknown }).statuses : undefined;
+  if (list === undefined) return [];
+  if (!Array.isArray(list) || !list.every((k) => typeof k === "string" && k.trim())) {
+    return undefined;
+  }
+  return list.map((k: string) => k.trim());
 }
 
 /** A dispatch's `attachments` (none when absent); undefined when malformed. */

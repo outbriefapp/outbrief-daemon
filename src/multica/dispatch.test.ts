@@ -64,6 +64,15 @@ function fakeMultica() {
       state.listed.push(url.search);
       return json({ issues: [ISSUE], total: 1 });
     }
+    if (path === "/api/issue-statuses") {
+      return json({
+        statuses: [
+          { key: "backlog", name: "Backlog", archived_at: null },
+          { key: "qa", name: "QA", archived_at: null },
+          { key: "old", name: "Old", archived_at: "2026-09-01T00:00:00Z" },
+        ],
+      });
+    }
     if (path === "/api/projects/p1") return json({ id: "p1", title: "outbrief" });
     if (path === "/api/agents") {
       return json([
@@ -306,6 +315,17 @@ describe("Dispatcher", () => {
       limit: "50",
       q: "知悉",
     });
+  });
+
+  it("filters the issues by several statuses at once, from the workspace's catalog", async () => {
+    const { dispatcher, state } = setup();
+    await dispatcher.issues({ projectId: "p1", statuses: ["backlog", "in_progress"] });
+    expect(new URLSearchParams(state.listed[0]).get("statuses")).toBe("backlog,in_progress");
+    // Custom statuses are offered too; archived ones are not.
+    expect(await dispatcher.statuses()).toEqual([
+      { key: "backlog", name: "Backlog" },
+      { key: "qa", name: "QA" },
+    ]);
   });
 
   it("comments on the picked issue instead of creating one (OUTB-61)", async () => {

@@ -71,12 +71,16 @@ async function start() {
       },
       issues: async (input) => {
         calls.push(
-          `issues ${input.projectId} ${input.query ?? ""}${input.workspaceId ? ` in ${input.workspaceId}` : ""}`,
+          `issues ${input.projectId} ${input.query ?? ""}${input.statuses ? ` [${input.statuses.join(",")}]` : ""}${input.workspaceId ? ` in ${input.workspaceId}` : ""}`,
         );
         return [
           { id: "i1", identifier: "OUTB-1", title: "旧需求", status: "todo", priority: "none" },
         ];
       },
+      statuses: async (workspaceId) => [
+        { key: "backlog", name: workspaceId ?? "Backlog" },
+        { key: "in_progress", name: "In Progress" },
+      ],
       upload: async (image, workspaceId) => {
         if (!image.type.startsWith("image/")) throw new DispatchError("invalid_dispatch");
         if (workspaceId) calls.push(`upload in ${workspaceId}`);
@@ -305,6 +309,27 @@ describe("settings API", () => {
       ],
     });
     expect(calls).toEqual(["issues p1 登录 in ws-2"]);
+    // Several statuses at once: issues in any of them.
+    await call("/multica/dispatch/issues", {
+      method: "POST",
+      body: JSON.stringify({ projectId: "p1", statuses: ["backlog", " in_progress "] }),
+    });
+    expect(calls.at(-1)).toBe("issues p1  [backlog,in_progress]");
+    const badStatuses = await call("/multica/dispatch/issues", {
+      method: "POST",
+      body: JSON.stringify({ projectId: "p1", statuses: "backlog" }),
+    });
+    expect(badStatuses.status).toBe(400);
+    const statuses = await call("/multica/dispatch/statuses", {
+      method: "POST",
+      body: JSON.stringify({ workspaceId: "ws-2" }),
+    });
+    expect(await statuses.json()).toEqual({
+      statuses: [
+        { key: "backlog", name: "ws-2" },
+        { key: "in_progress", name: "In Progress" },
+      ],
+    });
     const noProject = await call("/multica/dispatch/issues", {
       method: "POST",
       body: JSON.stringify({}),
