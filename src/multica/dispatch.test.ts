@@ -20,6 +20,7 @@ function fakeMultica() {
     issues: new Map<string, Record<string, unknown>>(),
     posted: [] as { path: string; body: unknown }[],
     uploads: [] as { name: string; type: string; bytes: number }[],
+    listed: [] as string[],
     refuse: null as { status: number; body: unknown } | null,
   };
   const json = (body: unknown, status = 200) => new Response(JSON.stringify(body), { status });
@@ -41,6 +42,14 @@ function fakeMultica() {
         if (state.refuse) return json(state.refuse.body, state.refuse.status);
         return json({ task_id: "task-1" }, 202);
       }
+      if (path === "/api/issues/i1/comments") {
+        return json({
+          id: "c-9",
+          author_type: "member",
+          content: "x",
+          created_at: "2026-09-30T10:00:00Z",
+        });
+      }
       if (path === "/api/tasks/task-1/cancel") return json({ id: "task-1", status: "cancelled" });
     }
     if (path === "/api/projects") {
@@ -48,6 +57,19 @@ function fakeMultica() {
         projects: [
           { id: "p1", title: "outbrief", status: "in_progress" },
           { id: "p2", title: "old", status: "completed" },
+        ],
+      });
+    }
+    if (path === "/api/issues" && init?.method === "GET") {
+      state.listed.push(url.search);
+      return json({ issues: [ISSUE], total: 1 });
+    }
+    if (path === "/api/issue-statuses") {
+      return json({
+        statuses: [
+          { key: "backlog", name: "Backlog", archived_at: null },
+          { key: "qa", name: "QA", archived_at: null },
+          { key: "old", name: "Old", archived_at: "2026-09-01T00:00:00Z" },
         ],
       });
     }
@@ -274,5 +296,76 @@ describe("Dispatcher", () => {
     await expect(
       dispatcher.create({ projectId: "p1", agentId: "a1", prompt: "   " }),
     ).rejects.toMatchObject({ code: "invalid_dispatch" });
+  });
+
+  it("lists the project's issues, most recently active first, to pick one (OUTB-61)", async () => {
+    const { dispatcher, state } = setup();
+    expect(await dispatcher.issues({ projectId: "p1", query: "知悉" })).toEqual([
+      {
+        id: "i1",
+        identifier: "YOUT-230",
+        title: "来电页按项目一键知悉",
+        status: "todo",
+        priority: "high",
+      },
+    ]);
+    expect(Object.fromEntries(new URLSearchParams(state.listed[0]))).toEqual({
+      project_id: "p1",
+      sort: "last_activity",
+      limit: "50",
+      q: "知悉",
+    });
+  });
+
+  it("filters the issues by several statuses at once, from the workspace's catalog", async () => {
+    const { dispatcher, state } = setup();
+    await dispatcher.issues({ projectId: "p1", statuses: ["backlog", "in_progress"] });
+    expect(new URLSearchParams(state.listed[0]).get("statuses")).toBe("backlog,in_progress");
+    // Custom statuses are offered too; archived ones are not.
+    expect(await dispatcher.statuses()).toEqual([
+      { key: "backlog", name: "Backlog" },
+      { key: "qa", name: "QA" },
+    ]);
+  });
+
+  it("comments on the picked issue instead of creating one (OUTB-61)", async () => {
+    const { dispatcher, state, store } = setup();
+    state.issues.set("/api/issues/i1", { ...ISSUE, assignee_type: "agent", assignee_id: "a1" });
+    const dispatch = await dispatcher.create({
+      issueId: "i1",
+      prompt: "  顺便把未接来电也算上  ",
+      attachments: [{ id: "att-1", filename: "shot.png", markdownUrl: "https://m.test/att-1" }],
+    });
+    expect(state.posted).toEqual([
+      {
+        path: "/api/issues/i1/comments",
+        body: {
+          content: "顺便把未接来电也算上\n\n![shot.png](https://m.test/att-1)",
+          attachment_ids: ["att-1"],
+        },
+      },
+    ]);
+    expect(dispatch).toMatchObject({
+      id: "c-9",
+      kind: "comment",
+      state: "created",
+      projectTitle: "outbrief",
+      agentId: "a1",
+      agentName: "资深架构师",
+      prompt: "顺便把未接来电也算上",
+      images: 1,
+      issue: { id: "i1", identifier: "YOUT-230" },
+    });
+    expect(store.get("c-9")).toEqual(dispatch);
+    // Nothing to wait for or cancel: the comment is already posted.
+    expect((await dispatcher.cancel("c-9")).state).toBe("created");
+  });
+
+  it("refuses a comment on an issue that is gone", async () => {
+    const { dispatcher, state } = setup();
+    await expect(dispatcher.create({ issueId: "gone", prompt: "x" })).rejects.toMatchObject({
+      code: "issue_not_found",
+    });
+    expect(state.posted).toEqual([]);
   });
 });

@@ -35,6 +35,9 @@ export interface MulticaIssue {
   project_id?: string | null;
   /** "todo" | "in_progress" | "in_review" | "done" | … (custom statuses too); absent on old servers. */
   status?: string;
+  /** "member" | "agent" | "squad"; null when nobody is assigned. */
+  assignee_type?: string | null;
+  assignee_id?: string | null;
   updated_at: string;
 }
 
@@ -85,6 +88,15 @@ export interface MulticaProjectEntry {
   title: string;
   /** "planned" | "in_progress" | "paused" | "completed" | "cancelled". */
   status?: string;
+}
+
+/** One status of the workspace's issue status catalog (`GET /api/issue-statuses`). */
+export interface MulticaIssueStatus {
+  /** What issues carry in `status` ("todo", or a custom status's key). */
+  key: string;
+  name: string;
+  /** Set on statuses no longer offered. */
+  archived_at?: string | null;
 }
 
 /** A file uploaded to the workspace (`POST /api/upload-file`), not bound to an issue yet. */
@@ -153,6 +165,16 @@ const isProjectList: Check<{ projects: MulticaProjectEntry[] }> = (
   v,
 ): v is { projects: MulticaProjectEntry[] } =>
   !!v && typeof v === "object" && arrayOf(isProject)((v as { projects?: unknown }).projects);
+const isIssueList: Check<{ issues: MulticaIssue[] }> = (v): v is { issues: MulticaIssue[] } =>
+  !!v && typeof v === "object" && arrayOf(isIssue)((v as { issues?: unknown }).issues);
+const isStatusCatalog: Check<{ statuses: MulticaIssueStatus[] }> = (
+  v,
+): v is { statuses: MulticaIssueStatus[] } =>
+  !!v &&
+  typeof v === "object" &&
+  arrayOf((s): s is MulticaIssueStatus => hasStrings(s, ["key", "name"]))(
+    (v as { statuses?: unknown }).statuses,
+  );
 const isQuickCreate: Check<{ task_id: string }> = (v): v is { task_id: string } =>
   hasStrings(v, ["task_id"]);
 // Multica answers `{ id: "" }` when it stored the file but not its attachment row.
@@ -196,6 +218,32 @@ export class MulticaClient {
   /** The issue's comments, oldest first (Multica keeps the newest 2 000). */
   listComments(issueId: string): Promise<MulticaComment[]> {
     return this.#request(arrayOf(isComment), `/api/issues/${encodeURIComponent(issueId)}/comments`);
+  }
+
+  /**
+   * The project's issues, most recently active first (Multica answers at most 100); `query` keeps
+   * those whose title has every word of it, or whose number it is; `statuses` (status keys) those
+   * in any of them.
+   */
+  async listIssues(input: {
+    projectId: string;
+    query?: string;
+    statuses?: string[];
+    limit: number;
+  }): Promise<MulticaIssue[]> {
+    const params = new URLSearchParams({
+      project_id: input.projectId,
+      sort: "last_activity",
+      limit: String(input.limit),
+    });
+    if (input.query) params.set("q", input.query);
+    if (input.statuses?.length) params.set("statuses", input.statuses.join(","));
+    return (await this.#request(isIssueList, `/api/issues?${params}`)).issues;
+  }
+
+  /** The workspace's issue statuses, in board order (custom ones too). */
+  async listIssueStatuses(): Promise<MulticaIssueStatus[]> {
+    return (await this.#request(isStatusCatalog, "/api/issue-statuses")).statuses;
   }
 
   getProject(projectId: string): Promise<MulticaProject> {
@@ -280,15 +328,25 @@ export class MulticaClient {
 
   /**
    * Posts a comment as the PAT's user. Replying to an agent's comment (`parentId`) makes Multica
-   * start that agent on the reply.
+   * start that agent on the reply; a new top-level comment starts the issue's assigned agent.
    */
   createComment(
     issueId: string,
-    input: { content: string; parentId: string },
+    input: {
+      content: string;
+      /** Absent for a new top-level comment. */
+      parentId?: string;
+      /** Uploads referenced in `content`: Multica binds them to the comment. */
+      attachmentIds?: string[];
+    },
   ): Promise<MulticaComment> {
     return this.#request(isComment, `/api/issues/${encodeURIComponent(issueId)}/comments`, {
       method: "POST",
-      body: { content: input.content, parent_id: input.parentId },
+      body: {
+        content: input.content,
+        ...(input.parentId ? { parent_id: input.parentId } : {}),
+        ...(input.attachmentIds?.length ? { attachment_ids: input.attachmentIds } : {}),
+      },
     });
   }
 

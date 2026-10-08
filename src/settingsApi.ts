@@ -18,7 +18,10 @@ type Method = (typeof METHODS)[number];
 
 export interface SettingsApiOptions {
   multica: Pick<MulticaService, "view" | "listWorkspaces" | "save" | "remove" | "issues">;
-  dispatcher: Pick<Dispatcher, "options" | "upload" | "create" | "list" | "lookup" | "cancel">;
+  dispatcher: Pick<
+    Dispatcher,
+    "options" | "issues" | "statuses" | "upload" | "create" | "list" | "lookup" | "cancel"
+  >;
   e2e: Pick<E2eKeyring, "view" | "set" | "openSettingsRequest" | "sealSettingsResult">;
   llm: Pick<LlmSettings, "view" | "save" | "remove">;
   brief: Pick<BriefSettings, "view" | "save">;
@@ -54,13 +57,19 @@ export interface SettingsResult {
  * - `GET /multica/dispatch/options` → `{ projects, agents }`: where the app can dispatch to in the
  *   first workspace; `POST /multica/dispatch/options` `{ workspaceId }` the same in that one; and
  *   whether each agent's machine is online
+ * - `POST /multica/dispatch/issues` `{ projectId, query?, statuses?, workspaceId? }` → `{ issues }`:
+ *   the project's issues, most recently active first, that a dispatch may comment on instead;
+ *   `statuses` (status keys) keeps those in any of them
+ * - `POST /multica/dispatch/statuses` `{ workspaceId? }` → `{ statuses: [{ key, name }] }`: the
+ *   workspace's issue statuses (custom ones too), in board order, to filter that list by
  * - `POST /multica/uploads` `{ name, type, data, workspaceId? }` (one image, base64, at most Multica's 100 MB)
  *   → `{ attachment: { id, filename, markdownUrl } }`: uploaded to the workspace for a dispatch;
  *   400 `invalid_dispatch` when it is not an image or is too big
  * - `POST /multica/dispatches` `{ projectId, agentId, prompt, attachments?, workspaceId? }` → `{ dispatch }`: the
  *   picked agent turns what the user said (and the uploaded images) into an issue (Multica's smart
  *   create); 422 `agent_unavailable` (with Multica's `message`) / `project_not_found` /
- *   `agent_not_found`, 400 `invalid_dispatch`
+ *   `agent_not_found`, 400 `invalid_dispatch`; with `issueId` (no `projectId` / `agentId` needed)
+ *   it is posted as a comment on that issue instead (OUTB-61), 422 `issue_not_found`
  * - `GET /multica/dispatches` → `{ dispatches }`: what was dispatched from this machine, newest
  *   first, as it is now in Multica
  * - `POST /multica/dispatches/lookup` `{ id }` → `{ dispatch }`: one of them; 422 `dispatch_not_found`
@@ -250,24 +259,49 @@ async function route(
       body: await options.dispatcher.options(stringField(body, "workspaceId")),
     };
   }
+  if (path === "/multica/dispatch/issues" && method === "POST") {
+    const projectId = stringField(body, "projectId");
+    if (!projectId) return { status: 400, body: { error: "invalid_dispatch" } };
+    const query = stringField(body, "query");
+    const statuses = statusKeys(body);
+    const workspaceId = stringField(body, "workspaceId");
+    if (!statuses) return { status: 400, body: { error: "invalid_dispatch" } };
+    return {
+      status: 200,
+      body: {
+        issues: await options.dispatcher.issues({
+          projectId,
+          ...(query ? { query } : {}),
+          ...(statuses.length ? { statuses } : {}),
+          ...(workspaceId ? { workspaceId } : {}),
+        }),
+      },
+    };
+  }
+  if (path === "/multica/dispatch/statuses" && method === "POST") {
+    return {
+      status: 200,
+      body: { statuses: await options.dispatcher.statuses(stringField(body, "workspaceId")) },
+    };
+  }
   if (path === "/multica/dispatches" && method === "GET") {
     return { status: 200, body: { dispatches: await options.dispatcher.list() } };
   }
   if (path === "/multica/dispatches" && method === "POST") {
     const projectId = stringField(body, "projectId");
     const agentId = stringField(body, "agentId");
+    const issueId = stringField(body, "issueId");
     const prompt = rawString(body, "prompt") ?? "";
     const attachments = dispatchAttachments(body);
     const workspaceId = stringField(body, "workspaceId");
-    if (!projectId || !agentId || !attachments) {
+    if (!(issueId || (projectId && agentId)) || !attachments) {
       return { status: 400, body: { error: "invalid_dispatch" } };
     }
     return {
       status: 200,
       body: {
         dispatch: await options.dispatcher.create({
-          projectId,
-          agentId,
+          ...(issueId ? { issueId } : { projectId, agentId }),
           prompt,
           attachments,
           ...(workspaceId ? { workspaceId } : {}),
@@ -368,6 +402,17 @@ function issueRefs(body: unknown): { workspaceId: string; issueId: string }[] | 
     refs.push({ workspaceId, issueId });
   }
   return refs;
+}
+
+/** `statuses`: non-empty status keys (none when absent); undefined when malformed. */
+function statusKeys(body: unknown): string[] | undefined {
+  const list =
+    body && typeof body === "object" ? (body as { statuses?: unknown }).statuses : undefined;
+  if (list === undefined) return [];
+  if (!Array.isArray(list) || !list.every((k) => typeof k === "string" && k.trim())) {
+    return undefined;
+  }
+  return list.map((k: string) => k.trim());
 }
 
 /** A dispatch's `attachments` (none when absent); undefined when malformed. */
