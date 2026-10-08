@@ -60,10 +60,22 @@ async function start() {
         if (!input.prompt.trim() && !input.attachments?.length)
           throw new DispatchError("invalid_dispatch");
         const images = input.attachments?.map((a) => a.id).join(",");
+        if (input.issueId) {
+          calls.push(`comment ${input.issueId} ${input.prompt}`);
+          return { id: "c-1", kind: "comment", state: "created" } as Dispatch;
+        }
         calls.push(
           `dispatch ${input.projectId} ${input.agentId} ${input.prompt}${images ? ` [${images}]` : ""}${input.workspaceId ? ` in ${input.workspaceId}` : ""}`,
         );
         return { id: "task-1", state: "creating" } as Dispatch;
+      },
+      issues: async (input) => {
+        calls.push(
+          `issues ${input.projectId} ${input.query ?? ""}${input.workspaceId ? ` in ${input.workspaceId}` : ""}`,
+        );
+        return [
+          { id: "i1", identifier: "OUTB-1", title: "旧需求", status: "todo", priority: "none" },
+        ];
       },
       upload: async (image, workspaceId) => {
         if (!image.type.startsWith("image/")) throw new DispatchError("invalid_dispatch");
@@ -279,6 +291,39 @@ describe("settings API", () => {
     });
     expect(await cancel.json()).toEqual({ dispatch: { id: "task-1", state: "cancelled" } });
     expect(await (await call("/multica/dispatches")).json()).toEqual({ dispatches: [] });
+  });
+
+  it("lists a project's issues and comments on the picked one (OUTB-61)", async () => {
+    const { call, calls } = await start();
+    const issues = await call("/multica/dispatch/issues", {
+      method: "POST",
+      body: JSON.stringify({ projectId: "p1", query: " 登录 ", workspaceId: "ws-2" }),
+    });
+    expect(await issues.json()).toEqual({
+      issues: [
+        { id: "i1", identifier: "OUTB-1", title: "旧需求", status: "todo", priority: "none" },
+      ],
+    });
+    expect(calls).toEqual(["issues p1 登录 in ws-2"]);
+    const noProject = await call("/multica/dispatch/issues", {
+      method: "POST",
+      body: JSON.stringify({}),
+    });
+    expect(noProject.status).toBe(400);
+    // With an issue picked, neither a project nor an agent is needed.
+    const comment = await call("/multica/dispatches", {
+      method: "POST",
+      body: JSON.stringify({ issueId: "i1", prompt: "补充一下" }),
+    });
+    expect(await comment.json()).toEqual({
+      dispatch: { id: "c-1", kind: "comment", state: "created" },
+    });
+    expect(calls.at(-1)).toBe("comment i1 补充一下");
+    const nothing = await call("/multica/dispatches", {
+      method: "POST",
+      body: JSON.stringify({ projectId: "p1", prompt: "x" }),
+    });
+    expect(nothing.status).toBe(400);
   });
 
   it("answers the CORS preflight and refuses a foreign Host header", async () => {

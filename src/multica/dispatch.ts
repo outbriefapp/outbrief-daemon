@@ -28,6 +28,8 @@ const LINK_GRACE_MS = 60_000;
 /** A task no longer among the agent's latest runs after this long is given up on. */
 const LOST_AFTER_MS = 24 * 60 * 60 * 1000;
 const ISSUE_LOOKUP_CONCURRENCY = 6;
+/** Issues offered when the user picks one to comment on. */
+const ISSUE_PICK_LIMIT = 50;
 
 /** A project to dispatch into; mirrors the app's `DispatchProject`. */
 export interface DispatchProject {
@@ -59,8 +61,14 @@ export type DispatchState = "creating" | "created" | "failed" | "cancelled";
 
 /** One request the user dispatched from the app; mirrors the app's `Dispatch`. */
 export interface Dispatch {
-  /** The Multica quick-create task. */
+  /** The Multica quick-create task; for a `comment`, the comment. */
   id: string;
+  /**
+   * - `issue` (or absent, on older dispatches): the agent turned the request into a new issue
+   * - `comment`: the request was posted as a comment on an issue the user picked (OUTB-61); it is
+   *   `created` at once, and `agentId` / `agentName` are the issue's assigned agent, if any
+   */
+  kind?: "issue" | "comment";
   workspaceId: string;
   projectId: string;
   projectTitle: string;
@@ -109,6 +117,7 @@ export class DispatchError extends Error {
     | "agent_unavailable"
     | "project_not_found"
     | "agent_not_found"
+    | "issue_not_found"
     | "dispatch_not_found";
 
   constructor(code: DispatchError["code"], message: string = code) {
@@ -216,6 +225,23 @@ export class Dispatcher {
   }
 
   /**
+   * The project's issues the user may comment on instead of creating one, most recently active
+   * first; `query` narrows them by title words or issue number.
+   */
+  async issues(input: {
+    workspaceId?: string;
+    projectId: string;
+    query?: string;
+  }): Promise<DispatchIssue[]> {
+    const issues = await this.#client(input.workspaceId).listIssues({
+      projectId: input.projectId,
+      ...(input.query ? { query: input.query } : {}),
+      limit: ISSUE_PICK_LIMIT,
+    });
+    return issues.map(issueView);
+  }
+
+  /**
    * Uploads one image to the workspace, not bound to an issue yet; the app uploads a dispatch's
    * images one by one, then sends their attachments with `create`.
    */
@@ -240,13 +266,17 @@ export class Dispatcher {
    * Hands the request to Multica's smart create and records it as `creating`. Uploaded images go
    * in the request as markdown with their ids in `attachment_ids`, the way Multica's own
    * quick-create dialog does: the agent keeps them in the issue's description and binds them to
-   * the issue.
+   * the issue. With `issueId`, the request is posted as a comment on that issue instead.
    */
   async create(input: {
     /** The first saved workspace when absent. */
     workspaceId?: string;
-    projectId: string;
-    agentId: string;
+    /** Required unless `issueId` is given: the project the new issue goes in. */
+    projectId?: string;
+    /** Required unless `issueId` is given: the issue's assigned agent takes a comment. */
+    agentId?: string;
+    /** An existing issue to comment on rather than creating one (OUTB-61). */
+    issueId?: string;
     prompt: string;
     attachments?: DispatchAttachment[];
   }): Promise<Dispatch> {
@@ -258,6 +288,9 @@ export class Dispatcher {
     if (!attachments.every((a) => /^https?:\/\/[^\s()]+$/.test(a.markdownUrl) && !!a.id)) {
       throw new DispatchError("invalid_dispatch");
     }
+    if (input.issueId)
+      return this.#comment({ ...input, issueId: input.issueId, prompt, attachments });
+    if (!input.projectId || !input.agentId) throw new DispatchError("invalid_dispatch");
     const client = this.#client(input.workspaceId);
     const [project, agent] = await Promise.all([
       client.getProject(input.projectId).catch(notFound<never>("project_not_found")),
@@ -276,6 +309,7 @@ export class Dispatcher {
     }
     const dispatch: Dispatch = {
       id: taskId,
+      kind: "issue",
       workspaceId: client.config.workspaceId,
       projectId: project.id,
       projectTitle: project.title,
@@ -286,6 +320,47 @@ export class Dispatcher {
       createdAt: this.#now().toISOString(),
       state: "creating",
       issue: null,
+      error: null,
+    };
+    this.#store.put(dispatch);
+    return dispatch;
+  }
+
+  /**
+   * Posts the request (and the uploaded images, bound with `attachment_ids`) as a top-level comment
+   * on the picked issue, which starts the issue's assigned agent as any comment in Multica does.
+   */
+  async #comment(input: {
+    workspaceId?: string;
+    issueId: string;
+    prompt: string;
+    attachments: DispatchAttachment[];
+  }): Promise<Dispatch> {
+    const client = this.#client(input.workspaceId);
+    const issue = await client.getIssue(input.issueId).catch(notFound<never>("issue_not_found"));
+    const [project, agent] = await Promise.all([
+      issue.project_id ? client.getProject(issue.project_id) : null,
+      issue.assignee_type === "agent" && issue.assignee_id
+        ? client.getAgent(issue.assignee_id)
+        : null,
+    ]);
+    const comment = await client.createComment(issue.id, {
+      content: [input.prompt, ...input.attachments.map(imageMarkdown)].filter(Boolean).join("\n\n"),
+      attachmentIds: input.attachments.map((a) => a.id),
+    });
+    const dispatch: Dispatch = {
+      id: comment.id,
+      kind: "comment",
+      workspaceId: client.config.workspaceId,
+      projectId: project?.id ?? "",
+      projectTitle: project?.title ?? "",
+      agentId: agent?.id ?? "",
+      agentName: agent?.name ?? "",
+      prompt: input.prompt,
+      images: input.attachments.length,
+      createdAt: this.#now().toISOString(),
+      state: "created",
+      issue: issueView(issue),
       error: null,
     };
     this.#store.put(dispatch);
