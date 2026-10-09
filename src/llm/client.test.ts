@@ -73,6 +73,31 @@ describe("LlmClient", () => {
     expect((await failure(wrong.llm.generateObject("t", Answer, ask))).reason).toBe("schema");
   });
 
+  it("says why a response broke off: the connection was cut after the 200", async () => {
+    const cut = setup(
+      () =>
+        new Response(
+          new ReadableStream({
+            start(controller) {
+              controller.enqueue(new TextEncoder().encode(" "));
+              controller.error(
+                new TypeError("terminated", { cause: new Error("other side closed") }),
+              );
+            },
+          }),
+          { status: 200, headers: { "Content-Type": "application/json" } },
+        ),
+    );
+    const err = await failure(cut.llm.generateObject("t", Answer, ask));
+    expect(err.reason).toBe("error");
+    expect(err.message).toBe(
+      "LLM call failed (error): Failed to process successful response ← terminated ← other side closed",
+    );
+    expect(cut.logs[0]?.error).toBe(
+      "Failed to process successful response ← terminated ← other side closed",
+    );
+  });
+
   it("asks for json_schema, or for json_object with the schema in the prompt", async () => {
     const strict = setup(() => ok.clone());
     await strict.llm.generateObject("t", Answer, ask);
