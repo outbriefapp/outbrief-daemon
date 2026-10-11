@@ -8,7 +8,7 @@ The resident OutBrief process on each computer, in the same role as Multica's `m
 - [`outbrief-server`](https://github.com/outbriefapp/outbrief-server) is the only relay. It stores and forwards ciphertext. It has no key.
 - This repo, `outbrief-daemon`: one process per computer. It encrypts local agent reports, generates the spoken brief with the model configured on this machine, holds the WebSocket to the server (the computer opens no inbound port), and resumes the original agent session when a reply comes back.
 
-The Chinese README has the brief generator, the end-to-end format, the local settings API, and the hook payload. This page is how to install this process, in which order, and how it pairs with the desktop app and the phone.
+This page is how to install this process, how it pairs, and how briefs, encryption, and the agent hooks behave. The Chinese README is the reference for the local HTTP routes on port 8790.
 
 ## Install order
 
@@ -78,7 +78,87 @@ Another device, after this computer is already paired:
 node src/cli.ts pair
 ```
 
-The command reference in the [Chinese README](README.md) (section「配对：账号与设备」) uses the same `login` / `pair` flags (`--server`, `OUTBRIEF_SERVER_URL`, a bare 6-digit code, or a full `outbrief://pair` link).
+The same flags work on `login` and `pair`: `--server <url>`, or `OUTBRIEF_SERVER_URL`. A bare 6-digit code also asks for the sentence from Settings → Encryption. A full `outbrief://pair?…` link carries the server and the end-to-end key, so that sentence is not needed.
+
+```bash
+# This computer creates the account. The terminal shows a QR code and a 6-digit code
+node src/cli.ts login --server http://127.0.0.1:8787
+# The account already exists. Paste the link from Settings → Devices → Add a device
+node src/cli.ts login 'outbrief://pair?server=…&code=123456&key=obk1_…'
+# 6 digits only. Also type the sentence from Settings → Encryption
+node src/cli.ts login 123456
+# Add another device later
+node src/cli.ts pair
+```
+
+On a private server that has no owner yet, creating the account asks for the claim code from the server log (`Claim code: XXXX-XXXX-XXXX`). After that, new devices join with a pairing code. The server URL comes from the link, then from `--server`, then from `OUTBRIEF_SERVER_URL`, then from the prompt. The default prompt is `http://127.0.0.1:8787`.
+
+`login` again keeps the Multica token, the model, the report language, and the end-to-end key already in `~/.outbrief/daemon.json`. If the daemon is running, `node src/cli.ts install` restarts it so the new device token is the one in use. A computer that paired before an upgrade keeps its token.
+
+## Briefs
+
+The spoken paragraphs, the cards, and the open questions are generated here, not on the server. One structured LLM call, then a check: every critical fact was spoken, and the spoken text is at most 60% of the source when the source is longer than 300 characters. A miss is rewritten once. Critical facts still missing after that are appended as one more section, titled by the model in the brief's language, and read aloud.
+
+The language of that brief (speech, cards, conclusion, open questions, whatever language the original report used) is Settings → Voice → Report language in the app. The app writes it with `PUT /brief/language` into `brief.language` on startup and whenever it changes. The next brief uses it immediately. Before the app has set one, this computer's own language is used (macOS `AppleLanguages`, then `LC_ALL` / `LANG` / `Intl`, completed to a language-region tag). If none of those work, the language is `en-US`.
+
+The model is Settings → LLM in the app. Save writes `llm.primary` in `~/.outbrief/daemon.json`. The next brief uses it. No restart. There is one channel. There is no backup.
+
+```json
+{
+  "llm": {
+    "primary": {
+      "baseUrl": "https://api.deepseek.com",
+      "apiKey": "<your key>",
+      "model": "deepseek-flash",
+      "structuredOutput": "json_object"
+    }
+  }
+}
+```
+
+Any OpenAI-compatible endpoint works. `structuredOutput` is chosen in the app and checked with Test connection:
+
+- `json_schema` (the default): the request sends `response_format: json_schema` and the API enforces the schema.
+- `json_object`: for models without `json_schema` (DeepSeek, Claude's OpenAI-compatible API, local Ollama, and others). The schema goes in the system prompt, the request sends `response_format: json_object`, a markdown fence is stripped, and the same schema validates the result. A result that does not match is a failed call.
+
+A missing or malformed `baseUrl`, `apiKey`, or `model` counts as not configured. The startup log names the model and does not print the key. A failed call, or no configuration, still sends the report. The brief is `failed`, and the app reads the original text. Editing `daemon.json` by hand takes effect on the next start of the daemon. Saving from the app replaces `llm`. A hand-written `llm.fallback` is removed. It is not read.
+
+A brief takes 5–60 seconds. The hook only waits 5 seconds, so the report is stored first:
+
+1. `POST /report` accepts only a local process: `Host` is `127.0.0.1` or `localhost` plus the port, no `Origin`, `Content-Type: application/json`, body under about 0.8 MB. A page in a browser is rejected. The daemon records `sessionId → cwd`, writes `~/.outbrief/outbox.json` (temp file, then rename, mode 600), and returns `202 {"accepted": true}` before the brief exists. A finished Multica task is written to the same outbox.
+2. Up to 3 briefs are generated at once, in arrival order. The result is written back to the outbox. A later send failure or a restart does not generate that brief again.
+3. The daemon POSTs the sealed report to `/v1/daemon/events` (a local agent) or `/v1/daemon/multica-reports` (Multica). Network errors, 5xx, and 429 retry with backoff from 1 second up to 5 minutes, including across restarts. Any other 4xx is logged and dropped. `409 duplicate_task` means another computer already reported that Multica task. That counts as done.
+4. Startup resumes every unfinished report in the outbox. Shutdown aborts a brief still being generated. The next start generates it.
+
+## End-to-end encryption
+
+The report, the brief, the reply, and a reply's failure reason are encrypted between this computer and the app. The server stores and forwards ciphertext. It has no key.
+
+- The key is `e2e.key` in `~/.outbrief/daemon.json` (`obk1_…`, mode 600). The first `run` generates 32 random bytes. Settings → Encryption can replace it: the user types a sentence of at least 12 characters, PBKDF2-SHA256 (600,000 rounds) derives the `obk1_` key, and only the derived key is stored. The sentence is not stored. The app shows that one field. It does not show the derived key or the key id.
+- The desktop app on this computer reads the key from `GET /e2e/key`, authenticated with the local key file. Another device gets it from the QR code. A 6-digit code alone does not carry the key, so that device must type the same sentence.
+- A reply sealed with a different key cannot be opened. The daemon reports a content-free error, and the app shows it.
+
+## Agent stop hooks
+
+`node src/cli.ts hook claude-code` and `node src/cli.ts hook codex` are the Claude Code and Codex Stop hooks. When an agent turn ends, the hook POSTs the final reply to this daemon's `/report` (port `localPort` in `daemon.json`, default 8790).
+
+- `install` writes `~/.claude/settings.json` and `~/.codex/hooks.json`. The command is `"<node>" "<this checkout>/src/cli.ts" hook claude-code` or `hook codex`. Running `install` again, or after the checkout moves, removes the previous OutBrief hook first, including one left by the old `outbrief-hook` package, so one turn does not ring twice. `uninstall` removes them. After the Codex command changes, trust the hook again inside Codex.
+- Both Stop payloads arrive on stdin: `session_id`, `cwd`, `transcript_path`, `stop_hook_active`, `last_assistant_message`. An old Claude Code build with no `last_assistant_message` is read from the transcript. `stop_hook_active: true` (a second Stop after the hook itself continued the turn) is not reported.
+- A Codex `session_id` is the thread id. Only a thread that has a rollout file under `$CODEX_HOME/sessions` (default `~/.codex/sessions`) is reported, because only that thread can be resumed. Internal turns, such as the TUI naming a task, are skipped.
+- Inside a Multica task (`MULTICA_ISSUE_ID` / `MULTICA_TASK_ID`) the hook does not report. The daemon reads that report from Multica. Reporting here as well would ring twice.
+- The hook waits 5 seconds. The daemon answers `202` as soon as it accepts the report. If the daemon is not running, the report is dropped. Every failure exits 0, so the agent is not blocked.
+
+To check the hook without ringing the phone:
+
+```bash
+echo '{"session_id":"s1","cwd":"/tmp/demo","last_assistant_message":"Login module refactor is done."}' \
+  | node src/cli.ts hook claude-code --dry-run
+
+curl -X POST "http://127.0.0.1:8790/report?dryRun=1" -H "Content-Type: application/json" \
+  -d '{"source":"generic","title":"demo","content":"Login module refactor is done. 42 tests passed."}'
+```
+
+`--dry-run` prints the parsed report and does not call the daemon. `?dryRun=1` validates and echoes the body. It does not enter the outbox and does not ring. Omitting `dryRun` sends a real report and rings a real call.
 
 ## Commands
 
@@ -87,6 +167,8 @@ The command reference in the [Chinese README](README.md) (section「配对：账
 | `node src/cli.ts login` / `pair` | Create an account or join with a pairing code / show a QR code for a new device |
 | `node src/cli.ts install` / `uninstall` | macOS: write or remove the Claude Code and Codex Stop hooks and the launchd agent |
 | `node src/cli.ts run` | Stay connected to the server. This is the process `install` starts on macOS |
+| `node src/cli.ts brief-eval <report files…>` | Generate briefs with the model in `daemon.json` and do not send them. Exit 1 when a critical fact is missing or the spoken text is over 60% |
+| `node src/cli.ts hook claude-code` / `hook codex` | Stop hook entry. `--dry-run` prints the report and does not call the daemon |
 | `pnpm lint` / `pnpm format` | Biome check / write |
 | `pnpm typecheck` | `tsc` |
 | `pnpm test` | Vitest |
