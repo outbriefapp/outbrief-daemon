@@ -22,12 +22,12 @@
 
 ## 安装顺序
 
-来电只在同一个匿名账号里转发。推荐让本仓库（daemon）创建账号，桌面 App 和手机 App 都加入这个账号。
+来电只在同一个匿名账号里转发。推荐让本仓库（daemon）创建账号，桌面 App 和手机 App 都加入这个账号。已经有服务器时（例如 `https://api.outbriefapp.com`），从第 2 步开始，`login --server` 和 App 都填这个地址。注册关闭时不能自己建账号，用主人给出的配对码加入。
 
 1. **部署 [outbrief-server](https://github.com/outbriefapp/outbrief-server)**。只跑一个进程。私有化部署（默认）在还没有主人时，每次启动的日志里打印一次性认领码 `Claim code: XXXX-XXXX-XXXX`。记下服务地址。手机和别的电脑要能访问这个地址；`http://127.0.0.1:8787` 只有部署 server 的那台机器自己能用。给手机配对时，这里的 `--server` 填局域网 IP 或公网 `https://` 地址。
 2. **安装本仓库**。见下一节。`login` 时输入认领码，终端打出二维码。macOS 上再 `install`。
 3. **在同一台电脑上安装桌面 App（[outbrief-app](https://github.com/outbriefapp/outbrief-app)）**。`pnpm tauri build`，安装包在 `src-tauri/target/release/bundle/`。开发时用 `pnpm tauri dev`。daemon 已经在运行时，桌面端第一次打开会自动加入这台 daemon 的账号。
-4. **安装手机 App**。同一仓库，Android / iOS 工程在本机生成后再编译：`pnpm tauri android init`，然后 `pnpm tauri android dev` 或 `pnpm tauri android build`；iOS 用 `pnpm tauri ios init`，然后 `pnpm tauri ios dev` 或 `pnpm tauri ios build`。需要 [Tauri 的移动端环境](https://tauri.app/start/prerequisites/)。仓库里没有应用商店安装包。打开已配对设备的「设置 → 设备 → 添加设备」，或在电脑上执行 `node src/cli.ts pair`，用手机摄像头扫二维码。
+4. **安装手机 App（[outbrief-app](https://github.com/outbriefapp/outbrief-app)）**。可安装的 Android 包在那个仓库里执行 `scripts/build-android.sh`，产物是 `dist-android/OutBrief.apk`。来电推送由这个脚本打进包里。开发调试用 `pnpm tauri android dev` 或 `pnpm tauri android build` 时，要先 `export OUTBRIEF_FIREBASE_CONFIG=<google-services.json>`，否则包里没有推送。指向 `https://api.outbriefapp.com` 的安装包，必须用那台服务器所属的 Firebase 项目打包；自己另建的项目收不到它的推送，这个项目的 `google-services.json` 不在仓库里。iOS 用 `pnpm tauri ios init`，然后 `pnpm tauri ios dev` 或 `pnpm tauri ios build`；这一版没有来电推送。需要 [Tauri 的移动端环境](https://tauri.app/start/prerequisites/)。那个仓库没有应用商店安装包。装好后按它 README 的「手机在后台或锁屏时响铃」打开后台来电、通知、锁屏来电界面、来电弹出界面，电池选不受限制，并确认「推送唤醒」是已开启。打开已配对设备的「设置 → 设备 → 添加设备」，或在这台电脑上执行 `node src/cli.ts pair`，用手机摄像头扫二维码。
 
 ### 安装本仓库
 
