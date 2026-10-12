@@ -6,6 +6,8 @@ The resident OutBrief process on each user computer. It takes Claude Code / Code
 
 Docs, install steps, and design decisions are on the website: **<https://outbriefapp.com/en/>**
 
+Questions, feedback, and ideas: join us on [Discord](https://discord.gg/TG8qHzdv6).
+
 - [Daemon docs (install, pairing, briefs, hooks)](https://outbriefapp.com/en/docs/daemon/)
 - [Quick start (install order and pairing)](https://outbriefapp.com/en/docs/quick-start/)
 

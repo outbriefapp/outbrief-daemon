@@ -6,6 +6,8 @@
 
 使用文档、安装步骤和架构决策都在官网：**<https://outbriefapp.com>**
 
+问题、反馈和建议，欢迎来 [Discord](https://discord.gg/TG8qHzdv6) 交流。
+
 - [Daemon 文档（安装、配对、简报、hook、本机接口）](https://outbriefapp.com/docs/daemon/)
 - [快速开始（安装顺序与设备配对）](https://outbriefapp.com/docs/quick-start/)
 
